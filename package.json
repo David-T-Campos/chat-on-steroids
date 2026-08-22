@@ -1,0 +1,48 @@
+{
+  "name": "chat-on-steroids",
+  "version": "1.9.4",
+  "description": "Local Windows coding and computer-use bridge for ChatGPT over MCP, limited to folders and capabilities you approve.",
+  "license": "MIT",
+  "author": "Chat On Steroids",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify": "npm run typecheck && npm run test",
+    "verify:ci": "npm run typecheck && vitest run --exclude test/mcp-shutdown.test.ts && vitest run test/mcp-shutdown.test.ts",
+    "icon": "node scripts/make-icon.mjs",
+    "tunnel": "node scripts/fetch-tunnel-client.mjs",
+    "rg": "node scripts/fetch-ripgrep.mjs",
+    "packaging:prepare": "node scripts/prepare-packaging-native.mjs",
+    "dist": "npm run icon && npm run tunnel && npm run rg && npm run packaging:prepare && electron-vite build && electron-builder --win --x64 --arm64 --publish never",
+    "dist:x64": "npm run icon && npm run tunnel && npm run rg && npm run packaging:prepare && electron-vite build && electron-builder --win --x64 --publish never",
+    "dist:arm64": "npm run icon && npm run tunnel && npm run rg && npm run packaging:prepare && electron-vite build && electron-builder --win --arm64 --publish never",
+    "dist:dir": "npm run icon && npm run tunnel && npm run rg && npm run packaging:prepare && electron-vite build && electron-builder --win --x64 --arm64 --dir --publish never",
+    "dist:dir:x64": "npm run icon && npm run tunnel && npm run rg && npm run packaging:prepare && electron-vite build && electron-builder --win --x64 --dir --publish never",
+    "dist:dir:arm64": "npm run icon && npm run tunnel && npm run rg && npm run packaging:prepare && electron-vite build && electron-builder --win --arm64 --dir --publish never",
+    "test:kill": "node scripts/kill-stray-vitest.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "node-pty": "1.2.0-beta.15",
+    "sharp": "0.35.3",
+    "tree-sitter": "0.25.1",
+    "tree-sitter-bash": "0.25.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "^22.15.0",
+    "electron": "43.4.0",
+    "electron-builder": "^26.15.7",
+    "electron-vite": "^5.0.0",
+    "jsdom": "^30.0.1",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.10"
+  }
+}
