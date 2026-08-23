@@ -31,6 +31,7 @@ import { DEFAULT_CAPABILITIES, type Capabilities, type Root } from '../src/share
 import { emptyEvidence, noteExec, noteOutcome, runInCallContext, type CallContext } from '../src/main/mcp/call-context.js';
 import { observeRequestCorrelation } from '../src/main/session/correlation.js';
 import { resetExecOwnershipForTests } from '../src/main/codex/ownership.js';
+import { locateRipgrep } from '../src/main/ripgrep.js';
 import { IS_WINDOWS, makeTempDir, removeTempDir, writeTree } from './helpers.js';
 
 // ---------------------------------------------------------------- transport
@@ -1544,6 +1545,24 @@ describe('bounded output', () => {
     expect(text).toContain('export const helper = 1;');
   });
 
+  it('fails when every explicit read target failed, while keeping partial multi-read useful', async () => {
+    const allMissing = await core('tools/call', {
+      name: 'read',
+      arguments: { paths: ['/workspace/nope-a.txt', '/workspace/nope-b.txt'] }
+    });
+    expect(failed(allMissing)).toBe(true);
+    expect(textOf(allMissing)).toContain('/workspace/nope-a.txt — ERROR');
+    expect(textOf(allMissing)).toContain('/workspace/nope-b.txt — ERROR');
+
+    const partial = await core('tools/call', {
+      name: 'read',
+      arguments: { paths: ['/workspace/src/app.ts', '/workspace/nope.txt'] }
+    });
+    expect(failed(partial)).toBe(false);
+    expect(textOf(partial)).toContain('export const name = "app";');
+    expect(textOf(partial)).toContain('/workspace/nope.txt — ERROR');
+  });
+
   it('reads several files in one call', async () => {
     const reply = await core('tools/call', {
       name: 'read',
@@ -1971,6 +1990,96 @@ describe('exec_command and write_stdin', () => {
     });
     expect(reply.body.result?.isError).not.toBe(true);
     expect(textOf(reply)).toContain('native-workdir-ok');
+  });
+
+  it.runIf(IS_WINDOWS)('uses the shared scrubbed child environment and exposes bundled ripgrep', async () => {
+    // Unified exec used to construct a second, almost-identical environment instead of using
+    // childEnv(). That copy missed the secret scrubber and the bundled-rg PATH prefix. Both are
+    // contract properties, not implementation details: model-run commands must never inherit a
+    // connector credential, and `rg` is a runtime the app deliberately ships for those commands.
+    const heldSecret = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-must-never-reach-exec-command';
+    try {
+      const secret = await core('tools/call', {
+        name: 'exec_command',
+        arguments: {
+          cmd: "if ($env:OPENAI_API_KEY) { Write-Output 'LEAKED' } else { Write-Output 'SCRUBBED' }",
+          workdir: '/workspace',
+          yield_time_ms: 5_000
+        }
+      });
+      expect(failed(secret), textOf(secret)).toBe(false);
+      expect(textOf(secret)).toContain('SCRUBBED');
+      expect(textOf(secret)).not.toContain('LEAKED');
+    } finally {
+      if (heldSecret === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = heldSecret;
+    }
+
+    const bundled = locateRipgrep();
+    if (!bundled) return;
+    const rg = await core('tools/call', {
+      name: 'exec_command',
+      arguments: {
+        cmd: "Get-Command rg -CommandType Application | Select-Object -First 1 -ExpandProperty Source",
+        workdir: '/workspace',
+        yield_time_ms: 5_000
+      }
+    });
+    expect(failed(rg), textOf(rg)).toBe(false);
+    expect(textOf(rg).toLowerCase()).toContain(bundled.toLowerCase());
+  });
+
+  it.runIf(IS_WINDOWS)('binds bare PowerShell rg to the bundled binary instead of a shadowing function', async () => {
+    const bundled = locateRipgrep();
+    if (!bundled) return;
+    await fs.writeFile(path.join(approved, 'rg-shadow-target.txt'), 'needle-from-real-ripgrep\n', 'utf8');
+
+    const reply = await core('tools/call', {
+      name: 'exec_command',
+      arguments: {
+        // A profile function is the live failure mode; defining it inline makes the regression
+        // deterministic without touching the user's real PowerShell profile. The app's `rg`
+        // contract is the bundled runtime, so this function must never receive the invocation.
+        cmd: "function rg { Write-Output 'SHADOWED-RG'; exit 17 }; rg -n needle-from-real-ripgrep rg-shadow-target.txt",
+        workdir: '/workspace',
+        yield_time_ms: 5_000
+      }
+    });
+
+    expect(failed(reply), textOf(reply)).toBe(false);
+    expect(textOf(reply)).toContain('needle-from-real-ripgrep');
+    expect(textOf(reply)).not.toContain('SHADOWED-RG');
+    expect(reply.body.result?.structuredContent?.exit_code).toBe(0);
+  });
+
+  it('fails closed when an explicit shell name is unknown instead of silently switching languages', async () => {
+    const reply = await core('tools/call', {
+      name: 'exec_command',
+      arguments: {
+        cmd: 'echo must-not-run',
+        workdir: '/workspace',
+        shell: 'definitely-not-a-shell'
+      }
+    });
+    expect(reply.body.result?.isError).toBe(true);
+    expect(textOf(reply)).toContain('SHELL_NOT_FOUND');
+    expect(textOf(reply)).toContain('No command was run');
+  });
+
+  it.runIf(IS_WINDOWS)('does not replace a missing explicit pwsh path with Windows PowerShell 5.1', async () => {
+    const missingPwsh = path.join(approved, 'missing', 'pwsh.exe');
+    const reply = await core('tools/call', {
+      name: 'exec_command',
+      arguments: {
+        cmd: 'Write-Output one && Write-Output two',
+        workdir: '/workspace',
+        shell: missingPwsh
+      }
+    });
+    expect(reply.body.result?.isError).toBe(true);
+    expect(textOf(reply)).toContain('SHELL_NOT_FOUND');
+    expect(textOf(reply)).not.toContain('valid statement separator');
   });
 
   it('advertises the current Codex exec_command and write_stdin schemas', async () => {

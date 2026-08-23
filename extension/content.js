@@ -4997,23 +4997,38 @@
       if (!stopped) return 'ChatGPT would not stop the current turn. Nothing was compacted.';
     }
 
-    // SETTLING — bounded, and deliberately not fatal when the budget runs out: a call that
-    // is simply slow should delay the brief, not cancel it.
+    // SETTLING — bounded and fail-closed. A call that is still running at the deadline is
+    // exactly the state this barrier exists to keep out of a handoff: proceeding would copy
+    // a description of a machine while an edit/command is still changing that machine.
     nativePhase = 'settling';
     renderControl();
     // An app that will not say how many calls are running is a different situation from a
     // busy one, and waiting the full budget for it buys nothing: the budget ends by going
     // ahead regardless, so the only thing the silence costs is twenty seconds of a control
     // that says "Finishing local tools…" about an app that is not listening. A couple of
-    // retries covers a dropped answer; past that, get on with it.
+    // retries covers a dropped answer; past that, refuse because "could not verify zero" is
+    // not the same fact as zero.
     let unanswered = 0;
-    await waitUntil(async () => {
+    let unavailable = false;
+    const settled = await waitUntil(async () => {
       const count = await peekPendingTools();
-      if (count === null) return ++unanswered >= SETTLE_UNKNOWN_TRIES;
+      if (count === null) {
+        if (++unanswered >= SETTLE_UNKNOWN_TRIES) {
+          unavailable = true;
+          return true;
+        }
+        return false;
+      }
       unanswered = 0;
       pendingTools = count;
       return count === 0;
     }, TOOL_SETTLE_MS);
+    if (unavailable) {
+      return 'Could not verify that local tools had stopped. Nothing was compacted.';
+    }
+    if (!settled) {
+      return 'Local tools were still running after the settle timeout. Nothing was compacted.';
+    }
     return '';
   }
 
@@ -5400,9 +5415,18 @@
 
   /** How long to wait for ChatGPT to actually stop after the stop button is pressed. */
   const INTERRUPT_WAIT_MS = 15_000;
-  /** How long to wait for local tool calls to finish before prompting anyway. */
-  const TOOL_SETTLE_MS = 20_000;
-  /** How many silent answers about pending calls to sit through before going ahead. */
+  /**
+   * How long to wait for local tool calls and their recorder tail to settle before refusing.
+   *
+   * The app deliberately keeps an unattributed completed call visible as pending while its
+   * request-id evidence can still land. That recorder grace is 15 seconds in production.
+   * This browser-side deadline therefore must be comfortably larger than that grace or an
+   * otherwise-finished call can deterministically turn a harmless attribution delay into a
+   * refused compaction. Thirty seconds leaves the recorder its full window plus durable-write
+   * headroom without making a genuinely stuck local call wait anywhere near BRIEF_WATCH_MS.
+   */
+  const TOOL_SETTLE_MS = 30_000;
+  /** How many silent answers about pending calls to sit through before refusing. */
   const SETTLE_UNKNOWN_TRIES = 3;
 
   /**
@@ -5418,7 +5442,7 @@
     const reply = await ask({ type: 'activity', conversationId, since });
     if (!reply || reply.ok !== true || !reply.data) return null;
     const count = Number(reply.data.pendingTools);
-    return Number.isFinite(count) ? count : 0;
+    return Number.isFinite(count) && count >= 0 ? count : null;
   }
 
   /** Polls a condition. Resolves true when it holds, false when the budget runs out. */

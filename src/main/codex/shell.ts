@@ -147,10 +147,47 @@ export function ultimateFallbackShell(): DetectedShell {
     : { shellType: 'sh', shellPath: '/bin/sh' };
 }
 
-export function getShellByModelProvidedPath(shellPath: string): DetectedShell {
+/**
+ * Resolves a shell the model named explicitly.
+ *
+ * Explicit input is different from choosing a default. Falling back from an unknown or
+ * missing explicit shell to cmd.exe (or to another PowerShell found on PATH) changes the
+ * language the caller asked us to execute. That is especially dangerous for PowerShell 7
+ * syntax such as `&&`: a missing pwsh path used to run under Windows PowerShell 5.1 instead
+ * and fail with a parser error, while a completely unknown shell silently became cmd.exe.
+ *
+ * Bare recognised names such as `pwsh` or `bash` may still be resolved through PATH. A
+ * path-like value, however, means exactly that file and nothing else.
+ */
+export function getShellByModelProvidedPath(shellPath: string, cwd: string = process.cwd()): DetectedShell | null {
   const shellType = detectShellType(shellPath);
-  const detected = shellType ? getShell(shellType, shellPath) : null;
-  return detected ?? ultimateFallbackShell();
+  if (!shellType) return null;
+  const pathLike = nodePath.isAbsolute(shellPath) || /[\\/]/.test(shellPath);
+  if (pathLike) {
+    // A relative executable path is resolved by the process from the command's cwd, not from
+    // Electron's own process.cwd(). Validate against the same directory exec_command will
+    // hand to CreateProcess, otherwise `.\\tools\\pwsh.exe` can be rejected even though the
+    // exact executable exists where the caller asked the command to run.
+    const resolved = nodePath.isAbsolute(shellPath) ? shellPath : nodePath.resolve(cwd, shellPath);
+    return fileExists(resolved) ? { shellType, shellPath: resolved } : null;
+  }
+
+  // `powershell` and `pwsh` share one ShellType but they are not interchangeable languages.
+  // In particular Windows PowerShell 5.1 rejects `&&`/`||`, while PowerShell 7 accepts them.
+  // Feeding a bare explicit `powershell` through getShell('powershell', ...) would still prefer
+  // pwsh from PATH after the literal relative lookup failed, silently changing the exact shell
+  // the caller selected. Resolve these two spellings by executable brand instead. The `.exe`
+  // forms are handled too because models commonly spell Windows commands that way.
+  const stem = fileStem(shellPath)?.toLowerCase();
+  if (stem === 'pwsh') {
+    const resolved = which('pwsh') ?? PWSH_FALLBACK_PATHS.map(fileExists).find(Boolean) ?? null;
+    return resolved ? { shellType: 'powershell', shellPath: resolved } : null;
+  }
+  if (stem === 'powershell') {
+    const resolved = which('powershell') ?? POWERSHELL_FALLBACK_PATHS.map(fileExists).find(Boolean) ?? null;
+    return resolved ? { shellType: 'powershell', shellPath: resolved } : null;
+  }
+  return getShell(shellType, shellPath);
 }
 
 export function defaultUserShell(): DetectedShell {

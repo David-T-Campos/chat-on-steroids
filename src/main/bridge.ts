@@ -46,7 +46,7 @@ import {
   readRecentEvents,
   sessionDurableModifiedAt
 } from './session/store.js';
-import { inFlightMcpRequests, inFlightToolCalls } from './mcp/call-context.js';
+import { inFlightMcpRequests, runningToolCalls, settlingToolCalls } from './mcp/call-context.js';
 import { nativeHandoffPrompt } from './session/handoff-prompt.js';
 import { briefShortfall } from './session/handoff.js';
 import {
@@ -1047,12 +1047,17 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // How this chat's own Compact & Resume is going, so the page can say what is
         // happening instead of spinning.
         job: resumeJobFor(live.sessionId),
-        // Local calls still running for *this chat*. ChatGPT-native compaction waits for
-        // this to reach zero after interrupting the turn, so the handoff is written about
-        // a settled machine rather than one mid-edit. Scoped to the conversation, because a
-        // swarm runs several chats through one process: a global count let any worker's long
-        // build hold a settled brief busy until the watch expired and aborted the compaction.
-        pendingTools: inFlightToolCalls(live.conversationId),
+        // Local calls still executing for *this chat*. ChatGPT-native compaction waits for
+        // this to reach zero after interrupting the turn, so the handoff is written about a
+        // settled machine rather than one mid-edit. Recorder-only attribution settling is
+        // intentionally separate below: once the handler/result have returned, waiting up to
+        // REQUEST_ID_GRACE_MS to file its history cannot change the workspace and must not add
+        // a cross-chat 15-second tax to the machine-settle barrier.
+        pendingTools: runningToolCalls(live.conversationId),
+        // Diagnostic only. A finished unattributed call is still being placed into durable
+        // history; unknown ownership is conservatively projected onto every chat until that
+        // attribution finishes, but this number never gates the compaction prompt.
+        settlingTools: settlingToolCalls(live.conversationId),
         // The generation this chat currently has open, if it has one. A content script that
         // has just been reloaded into a turn already in flight adopts this instead of
         // minting a second id for the same run. See liveConversations().

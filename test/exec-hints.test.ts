@@ -16,12 +16,15 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  bindBundledRipgrep,
   execRecoveryHints,
   nonZeroExitIsBenign,
   normalizeShellCommand,
   statusDeterminingProgram,
   withExecNotes
 } from '../src/main/exec-hints.js';
+
+const BOUND_RG = "& 'C:\\tools\\rg.exe'";
 
 describe('which program decided the exit code', () => {
   it('reads through a pipeline of cmdlets to the program that generated the output', () => {
@@ -61,13 +64,13 @@ describe('which program decided the exit code', () => {
 describe('a non-zero exit that is a result rather than a failure', () => {
   it('treats ripgrep exit 1 with no output as "no matches"', () => {
     const output = 'Wall time: 0.0056 seconds\nProcess exited with code 1\nOutput:\n';
-    expect(nonZeroExitIsBenign('rg -n "CallToolRequest" src', 1, output)).toBe(true);
+    expect(nonZeroExitIsBenign(`${BOUND_RG} -n "CallToolRequest" src`, 1, output)).toBe(true);
   });
 
   it('treats ripgrep exit 1 after Select-Object truncated the pipe as success', () => {
     // The pipe closing early is why the code is non-zero; the matches did arrive.
     const output = 'Process exited with code 1\nOutput:\nclient.go:36: defaultMaxInFlightRequests = 20\n';
-    expect(nonZeroExitIsBenign('rg -n "Max" $root | Select-Object -First 160', 1, output)).toBe(true);
+    expect(nonZeroExitIsBenign(`${BOUND_RG} -n "Max" $root | Select-Object -First 160`, 1, output)).toBe(true);
   });
 
   it('still calls it an error when ripgrep printed an error of its own', () => {
@@ -94,6 +97,96 @@ describe('a non-zero exit that is a result rather than a failure', () => {
     const cmd = 'rg needle a[12]*.ts';
     expect(normalizeShellCommand(cmd, 'powershell', list).cmd).toBe(cmd);
     expect(normalizeShellCommand(cmd, 'powershell', list).notes).toEqual([]);
+  });
+
+  it('does not rewrite around PowerShell backtick escapes it does not parse', () => {
+    // In PowerShell the backtick escapes this space, so `foo` + `bar*.ts` is one argument.
+    // A whitespace-only tokenizer sees two tokens and would otherwise expand `bar*.ts`,
+    // silently changing one path into two arguments. Backticks therefore make the whole
+    // command ineligible for normalization rather than inviting a partial guess.
+    const list = (): readonly string[] => ['bar-one.ts', 'bar-two.ts'];
+    const escapedSpace = 'rg needle foo` bar*.ts';
+    expect(normalizeShellCommand(escapedSpace, 'powershell', list)).toEqual({
+      cmd: escapedSpace,
+      notes: []
+    });
+
+    // A backtick can also continue a physical line. Treating that newline as a statement
+    // separator would be the same class of parse corruption.
+    const continued = 'rg needle `\n*.ts';
+    expect(normalizeShellCommand(continued, 'powershell', list)).toEqual({ cmd: continued, notes: [] });
+  });
+
+  it('never grants a benign exit through a PowerShell backtick escape it cannot parse', () => {
+    // Real Windows PowerShell: the backtick escapes the semicolon, so the apparent `rg` tail
+    // is not a second statement at all. cmd exits 1, but a separator-only parser used to pick
+    // rg as the status program and turn the genuine cmd failure into "no matches".
+    for (const cmd of [
+      'cmd /c exit 1 `; rg foo',
+      'cmd /c exit 1 `| rg foo',
+      'cmd /c exit 1 `\nrg foo'
+    ]) {
+      expect(statusDeterminingProgram(cmd)).toBe('');
+      expect(nonZeroExitIsBenign(cmd, 1, '')).toBe(false);
+    }
+  });
+
+  it('never infers execution through comments or PowerShell here-strings it does not parse', () => {
+    const bundled = 'C:\\tools\\rg.exe';
+    // Everything after # is comment text. A separator-only parser used to see the semicolon,
+    // pick the apparent rg tail and could launder cmd's real exit 1 as a search miss.
+    const commented = 'cmd /c exit 1 # ; rg foo';
+    expect(statusDeterminingProgram(commented)).toBe('');
+    expect(nonZeroExitIsBenign(commented, 1, '')).toBe(false);
+    expect(bindBundledRipgrep(commented, 'powershell', bundled)).toBe(commented);
+
+    // Here-string contents are data, not statements. Newlines and semicolons inside them must
+    // never be rebuilt as shell structure or have a literal line beginning with rg rebound.
+    const hereString = '$x = @"\nrg foo *.ts; still text\n"@\nWrite-Output $x';
+    expect(statusDeterminingProgram(hereString)).toBe('');
+    expect(bindBundledRipgrep(hereString, 'powershell', bundled)).toBe(hereString);
+    expect(normalizeShellCommand(hereString, 'powershell', () => ['one.ts'])).toEqual({
+      cmd: hereString,
+      notes: []
+    });
+
+    // A hash inside ordinary quoted data is understood by the quote tracker and does not
+    // disable safe parsing unnecessarily.
+    expect(statusDeterminingProgram("Write-Output '#'; C:\\tools\\rg.exe foo")).toBe('rg');
+  });
+
+  it('does not trust a bare search command when command lookup could have shadowed it', () => {
+    // PowerShell command lookup prefers functions/aliases over applications. Both spellings
+    // below are legal function names; cmd.exe can likewise pick a current-directory rg.cmd;
+    // POSIX shells have functions/aliases too. The text alone therefore proves nothing.
+    expect(nonZeroExitIsBenign('rg foo', 1, '')).toBe(false);
+    expect(nonZeroExitIsBenign('rg.exe foo', 1, '')).toBe(false);
+
+    // A path-qualified executable cannot be replaced by command-name lookup. The call-operator
+    // form is what bindBundledRipgrep produces for a quoted Windows path.
+    expect(nonZeroExitIsBenign('.\\rg.exe foo', 1, '')).toBe(true);
+    expect(nonZeroExitIsBenign(`${BOUND_RG} foo`, 1, '')).toBe(true);
+  });
+
+  it('binds bare PowerShell ripgrep to the bundled executable without touching explicit/dynamic forms', () => {
+    const bundled = 'C:\\Program Files\\Chat On Steroids\\resources\\rg\\rg.exe';
+    expect(bindBundledRipgrep('rg -n foo src', 'powershell', bundled)).toBe(
+      "& 'C:\\Program Files\\Chat On Steroids\\resources\\rg\\rg.exe' -n foo src"
+    );
+    expect(bindBundledRipgrep('rg foo | Select-Object -First 5', 'powershell', bundled)).toBe(
+      "& 'C:\\Program Files\\Chat On Steroids\\resources\\rg\\rg.exe' foo | Select-Object -First 5"
+    );
+    expect(bindBundledRipgrep('Write-Output x; ripgrep foo', 'powershell', bundled)).toBe(
+      "Write-Output x; & 'C:\\Program Files\\Chat On Steroids\\resources\\rg\\rg.exe' foo"
+    );
+
+    // Explicit paths and dynamic/escaped commands preserve the exact shell semantics the
+    // caller wrote. The binding exists only for the bare name whose intended runtime the app
+    // already owns by shipping it and prepending it to PATH.
+    expect(bindBundledRipgrep('.\\tools\\rg.exe foo', 'powershell', bundled)).toBe('.\\tools\\rg.exe foo');
+    expect(bindBundledRipgrep('& $search foo', 'powershell', bundled)).toBe('& $search foo');
+    expect(bindBundledRipgrep('rg foo`; Write-Output x', 'powershell', bundled)).toBe('rg foo`; Write-Output x');
+    expect(bindBundledRipgrep('rg foo', 'bash', bundled)).toBe('rg foo');
   });
 
   it('hides a leading dot from a pattern without one, and only then', () => {
@@ -150,7 +243,7 @@ describe('a non-zero exit that is a result rather than a failure', () => {
     expect(nonZeroExitIsBenign('rg foo && go build ./...', 1, '')).toBe(false);
     // A `;` chain is unconditional: every statement ran, so the last one is the answer.
     expect(statusDeterminingProgram('cmd /c exit 1; rg foo')).toBe('rg');
-    expect(nonZeroExitIsBenign('cmd /c exit 1; rg foo', 1, '')).toBe(true);
+    expect(nonZeroExitIsBenign(`cmd /c exit 1; ${BOUND_RG} foo`, 1, '')).toBe(true);
   });
 
   it('never exempts a command the shell refused to parse', () => {
@@ -204,7 +297,7 @@ describe('a non-zero exit that is a result rather than a failure', () => {
     // The exemption has to survive, or the benign-exit rule stops firing on the real corpus:
     // these are the stage heads that actually follow a search in recorded sessions.
     expect(statusDeterminingProgram('rg x src | Select-Object -First 5')).toBe('rg');
-    expect(nonZeroExitIsBenign('rg x src | Sort-Object | Measure-Object', 1, '')).toBe(true);
+    expect(nonZeroExitIsBenign(`${BOUND_RG} x src | Sort-Object | Measure-Object`, 1, '')).toBe(true);
   });
 
   it('never exempts an exit code other than 1', () => {
@@ -316,8 +409,8 @@ describe('globs PowerShell will not expand for a native program', () => {
     for (const wrapper of ['.\\rg.ps1 foo', 'rg.cmd foo', 'rg.bat foo', 'C:\\tools\\rg.cmd foo']) {
       expect(nonZeroExitIsBenign(wrapper, 1, '')).toBe(false);
     }
-    // The real program still does, spelled either way.
-    expect(nonZeroExitIsBenign('rg foo', 1, '')).toBe(true);
+    // The real program still does when the command text proves an executable path.
+    expect(nonZeroExitIsBenign('rg foo', 1, '')).toBe(false);
     expect(nonZeroExitIsBenign('C:\\tools\\rg.exe foo', 1, '')).toBe(true);
     expect(statusDeterminingProgram('rg -n foo | rg.cmd bar')).toBe('rg.cmd');
   });

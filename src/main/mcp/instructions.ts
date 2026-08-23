@@ -54,6 +54,7 @@ function coreInstructions(ctx: ToolContext): string {
     // The gap that produced the most repeated shell failures: a POSIX shell expands globs
     // before the program runs and PowerShell does not, so the program receives the asterisk.
     'PowerShell does not expand * or ? for native programs. Pass ripgrep filename patterns as -g \'*.go\', and expand other globs with Get-ChildItem before use.',
+    'In PowerShell, bare rg/ripgrep is bound to Chat On Steroids’ bundled ripgrep binary. This keeps its version/exit semantics deterministic even if a user profile defines an rg alias or function; use an explicit path if you intentionally need a different executable.',
     // Two bash habits that Windows PowerShell answers with a failure the output does not
     // explain. Neither can be rewritten safely — stripping the redirect changes what the
     // command returns, and `;` is not what `&&` means — so they are said once, up front.

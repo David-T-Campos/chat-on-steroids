@@ -4,7 +4,11 @@ import path from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
 import { initDurableStore, resetDurableForTests } from '../src/main/durable.js';
-import { inFlightToolCalls } from '../src/main/mcp/call-context.js';
+import {
+  inFlightToolCalls,
+  runningToolCalls,
+  settlingToolCalls
+} from '../src/main/mcp/call-context.js';
 import { startMcpServer, type McpEndpoint } from '../src/main/mcp/server.js';
 import { initSessionStore, resetSessionStoreForTests, unsetSessionRootForTests } from '../src/main/session/store.js';
 
@@ -116,6 +120,12 @@ it('keeps an unattributed call counted while its record is still landing', async
   expect(inFlightToolCalls('conversation-a')).toBe(1);
   expect(inFlightToolCalls('conversation-b')).toBe(1);
   expect(inFlightToolCalls(null)).toBe(1);
+  // This distinction is the compaction contract. The machine-changing request is done, so
+  // `pendingTools` may be zero even while the unattributed history append stays observable.
+  expect(runningToolCalls('conversation-a')).toBe(0);
+  expect(runningToolCalls('conversation-b')).toBe(0);
+  expect(settlingToolCalls('conversation-a')).toBe(1);
+  expect(settlingToolCalls('conversation-b')).toBe(1);
 
   releaseRecord();
   releaseRecord = null;
@@ -125,4 +135,6 @@ it('keeps an unattributed call counted while its record is still landing', async
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   expect(inFlightToolCalls('conversation-a')).toBe(0);
+  expect(runningToolCalls('conversation-a')).toBe(0);
+  expect(settlingToolCalls('conversation-a')).toBe(0);
 });

@@ -173,6 +173,32 @@ function tokenize(segment: string): Token[] {
   return tokens;
 }
 
+/**
+ * Shell syntax this intentionally-small parser cannot model without guessing.
+ *
+ * Backticks can escape separators/quotes/whitespace. `#` starts comments outside quotes, so
+ * a textual `; rg ...` after it may never execute. PowerShell here-strings (`@"` / `@'`) are
+ * multiline quoting constructs whose interior may contain every separator this file splits.
+ * Any one of those turns a separator-only parse into an unsafe approximation. The caller's
+ * command still runs unchanged; we simply decline rewrites and benign-exit inference.
+ */
+function hasUnsupportedShellLexemes(command: string): boolean {
+  if (command.includes('`') || command.includes('@"') || command.includes("@'")) return true;
+  let quote: '"' | "'" | null = null;
+  for (const char of command) {
+    if (quote !== null) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === '#') return true;
+  }
+  return false;
+}
+
 /** Index of every top-level occurrence of any separator in `seps`, ignoring quoted text. */
 function splitTopLevel(command: string, seps: readonly string[]): string[] {
   const parts: string[] = [];
@@ -309,6 +335,24 @@ function stageIsPassive(segment: string): boolean {
 }
 
 /**
+ * The literal executable token at the head of one pipeline stage.
+ *
+ * PowerShell needs the call operator to execute a quoted path, so the deterministic bundled
+ * ripgrep form produced below is `& 'C:\\...\\rg.exe' ...`. Treat that literal path as the
+ * program, but refuse dynamic call-operator forms such as `& $cmd`: their target is runtime
+ * state and the command text cannot prove what actually ran.
+ */
+function stageProgramToken(segment: string): Token | null {
+  const tokens = tokenize(segment);
+  const first = tokens[0];
+  if (!first) return null;
+  if (first.value !== '&') return first;
+  const target = tokens[1];
+  if (!target || !/[\\/]/.test(target.value)) return null;
+  return target;
+}
+
+/**
  * The program whose exit status the shell will report.
  *
  * PowerShell sets `$LASTEXITCODE` from the last *native* program it ran — the last one in
@@ -325,7 +369,25 @@ function stageIsPassive(segment: string): boolean {
  * A stage this cannot classify counts as a program. That direction only ever withholds an
  * exemption, and a real failure recorded as a failure is the outcome to fail towards.
  */
-export function statusDeterminingProgram(command: string): string {
+/**
+ * The exact token whose process status would determine this command, when the lightweight
+ * parse is strong enough to name one.
+ *
+ * Kept separate from statusDeterminingProgram because the benign-exit decision needs one
+ * extra fact the display name intentionally throws away: whether the caller used a path.
+ * A profiled PowerShell can define `function rg { ... }` and even `function rg.exe { ... }`,
+ * so a bare spelling is not proof that ripgrep.exe ran. A path-qualified spelling cannot be
+ * intercepted by that command-name lookup and is therefore materially stronger evidence.
+ */
+function statusDeterminingToken(command: string): Token | null {
+  // The lightweight splitter below deliberately does not implement PowerShell's backtick
+  // escape grammar. That is already enough reason for normalizeShellCommand to leave such a
+  // line untouched, and it is equally important here: a backtick can escape `;`, `|`, a
+  // newline or whitespace, changing which textual fragment actually ran and which process
+  // supplied the exit status. Treating an escaped separator as real can make an upstream
+  // `cmd /c exit 1` look like a later `rg` no-match and silently launder the failure. With no
+  // trustworthy parse there is no trustworthy program name, so withhold the exemption.
+  if (hasUnsupportedShellLexemes(command)) return null;
   // A conditional chain decides at run time which of its branches ran, and nothing in the
   // text of it says which one did. `cmd /c exit 1 && rg foo` never reaches ripgrep at all —
   // PowerShell 7 runs the operator, sees the failure and stops — and yet the last statement
@@ -334,22 +396,26 @@ export function statusDeterminingProgram(command: string): string {
   // There is no program this can name honestly, so it names none, and the exemption that
   // depends on the name is withheld. Windows PowerShell 5.1 refuses such a line outright and
   // the output guard catches that; this is the shell where the operators actually work.
-  if (splitTopLevel(command, ['&&', '||']).length > 1) return '';
+  if (splitTopLevel(command, ['&&', '||']).length > 1) return null;
   const statements = splitTopLevel(command, [';', '\n']);
   const last = statements[statements.length - 1];
-  if (last === undefined) return '';
+  if (last === undefined) return null;
   const segments = splitTopLevel(last, ['|']);
   for (let i = segments.length - 1; i > 0; i--) {
     const segment = (segments[i] as string).trim();
     if (stageIsPassive(segment)) continue;
-    const first = tokenize(segment)[0];
+    const first = stageProgramToken(segment);
     // A program here set $LASTEXITCODE and is the answer; a cmdlet here could have decided
     // the status without touching it, and cannot be proven not to have.
-    return looksLikeCmdlet(first) ? '' : programName(first);
+    return looksLikeCmdlet(first ?? undefined) ? null : (first ?? null);
   }
   const generator = segments[0];
-  if (generator === undefined) return '';
-  return programName(tokenize(generator)[0]);
+  if (generator === undefined) return null;
+  return stageProgramToken(generator);
+}
+
+export function statusDeterminingProgram(command: string): string {
+  return programName(statusDeterminingToken(command) ?? undefined);
 }
 
 /**
@@ -383,16 +449,67 @@ const SHELL_REFUSED = new RegExp(
  * `rg: …: IO error …` and still exits 1, and that call really did fail. Checking the output
  * is what keeps this from laundering the very failures fix (2) exists to surface.
  */
-export function nonZeroExitIsBenign(command: string, exitCode: number | null, outputText: string): boolean {
+export function nonZeroExitIsBenign(
+  command: string,
+  exitCode: number | null,
+  outputText: string
+): boolean {
   if (exitCode !== 1) return false;
   // A shell that refused the command never reached the search at all, so reading the exit
   // code as the search's answer is a fabrication. `Write-Output hi && rg foo` is the case
   // that matters: Windows PowerShell 5.1 rejects `&&` outright, exits 1 without running a
   // thing, and this function would otherwise call it ripgrep finding no matches.
   if (SHELL_REFUSED.test(outputText)) return false;
-  const program = statusDeterminingProgram(command);
+  const token = statusDeterminingToken(command);
+  const program = programName(token ?? undefined);
   if (!NO_MATCH_MEANS_EXIT_1.has(program)) return false;
+  // A bare command name is not proof of which implementation ran. PowerShell profiles can
+  // define functions/aliases named `rg` and even `rg.exe`; cmd.exe searches the current
+  // directory before PATH and can pick up a local rg.cmd; POSIX shells have aliases/functions
+  // of their own. Any of those may exit 1 with no diagnostic for a reason unrelated to search
+  // results. A path-qualified token is the one representation the command text can actually
+  // prove. tools-core binds ordinary PowerShell `rg` calls to the bundled executable before
+  // they reach this classifier, preserving the common no-match case without trusting names.
+  const pathQualified = token !== null && /[\\/]/.test(token.value);
+  if (!pathQualified) return false;
   return !/^\s*(rg|ripgrep|grep|egrep|fgrep|findstr):/im.test(outputText);
+}
+
+/**
+ * Binds a bare PowerShell `rg`/`ripgrep` invocation to the binary the app deliberately ships.
+ *
+ * This project already parses ripgrep arguments against the bundled version's option table and
+ * prepends that binary's directory to child PATH. Leaving PowerShell command-name lookup in
+ * front of it broke that contract: a profile function/alias named `rg` won before PATH and could
+ * both receive rewrites intended for ripgrep 15.2.0 and have its exit 1 misfiled as "no matches".
+ *
+ * A quoted absolute path plus PowerShell's call operator makes the intended binary explicit.
+ * Only a literal bare program token at a top-level statement/pipeline head is changed. Dynamic
+ * invocations, already-qualified paths, quoted strings and commands containing backtick escapes
+ * stay untouched; the latter cannot be split safely by this lightweight parser.
+ */
+export function bindBundledRipgrep(command: string, shellType: ShellType, executable: string | null): string {
+  if (shellType !== 'powershell' || !executable || hasUnsupportedShellLexemes(command)) return command;
+  let changed = false;
+  const bound = rebuild(command, [';', '&&', '||', '\n'], (statement) =>
+    rebuild(statement, ['|'], (segment) => {
+      const match = /^(\s*)([\s\S]*?)(\s*)$/.exec(segment);
+      if (!match) return segment;
+      const lead = match[1] ?? '';
+      const body = match[2] ?? '';
+      const trail = match[3] ?? '';
+      const first = tokenize(body)[0];
+      if (!first || first.raw !== first.value) return segment;
+      if (!/^(?:rg|rg\.exe|ripgrep|ripgrep\.exe)$/i.test(first.value)) return segment;
+      if (/[\\/]/.test(first.value)) return segment;
+      const at = body.indexOf(first.raw);
+      if (at < 0) return segment;
+      changed = true;
+      const replacement = `& ${quoteArgument(executable)}`;
+      return `${lead}${body.slice(0, at)}${replacement}${body.slice(at + first.raw.length)}${trail}`;
+    })
+  );
+  return changed ? bound : command;
 }
 
 export interface NormalizedCommand {
@@ -599,6 +716,14 @@ export function normalizeShellCommand(
 ): NormalizedCommand {
   if (shellType !== 'powershell') return { cmd, notes: [] };
   if (!/[*?{]/.test(cmd)) return { cmd, notes: [] };
+  // This tokenizer intentionally does not implement PowerShell's backtick escape grammar.
+  // That is fine only while a backtick is absent. With one present, a visually separate token
+  // may actually be part of the same argument (`foo`<backtick>` bar*.ts`), a newline may be a
+  // continuation rather than a statement boundary, and an escaped quote/separator can change
+  // every split this normalizer makes. Rewriting around any of those would be silent command
+  // corruption, so the safe answer is to leave the entire line alone. A missed convenience
+  // rewrite costs one retry; a guessed parse can make a different command succeed.
+  if (hasUnsupportedShellLexemes(cmd)) return { cmd, notes: [] };
   // Without a directory there is nothing to expand a glob against, and guessing is not
   // available here: the point of the exercise is that the answer must be the shell's own.
   // Brace expansion needs no directory — it is textual — so it still runs, against a listing

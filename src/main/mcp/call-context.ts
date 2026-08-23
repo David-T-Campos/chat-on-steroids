@@ -107,50 +107,68 @@ export function runInCallContext<T>(context: CallContext, fn: () => T): T {
 }
 
 /**
- * Local tool calls this process is running right now, for one chat.
+ * Tool-call lifetime state, split by what is still capable of changing the machine.
  *
- * Needed by ChatGPT-native compaction. Interrupting the turn stops ChatGPT, but a call
- * already inside this process keeps going: a handoff written while a `run_powershell` or
- * an edit is still mid-flight describes a machine state that changes a second later, and
- * it is the *fresh* chat that then acts on the stale description. The page waits for this
- * to reach zero before it submits the handoff instruction.
+ * `running` is the request that has not returned from dispatch yet. This is the count the
+ * ChatGPT-native compaction barrier cares about: interrupting the ChatGPT turn does not stop
+ * a command/edit already inside this process, and a handoff written while that work is still
+ * live can describe a machine state that changes underneath the fresh chat.
  *
- * Counted per conversation, because the wait is per conversation. A swarm runs several
- * chats through one process, and a global count meant any worker's long build held the
- * prime's settled brief busy until the watch expired and the compaction aborted — a chat
- * blocked by work it has nothing to do with and cannot see. A call is only ever charged to
- * the chat it was *proven* to come from; one whose conversation is still unknown is charged
- * to every chat, which is the same conservative answer this gave before and the only safe
- * one while its owner could still turn out to be the caller.
+ * `settling` is deliberately different. It is a handler that has already returned and whose
+ * MCP result has been released, but whose durable session record is still waiting for late
+ * browser attribution. The recorder can spend REQUEST_ID_GRACE_MS there. Keeping that state
+ * observable is useful for diagnostics and shutdown/orphan accounting, but it is bookkeeping:
+ * it must not make every chat wait ~15 seconds before a compaction may describe an otherwise
+ * settled machine.
  *
- * Lives here rather than in `tools.ts` so the bridge can read it without importing the
- * whole tool surface (and, through it, Electron).
+ * Both states are charged per conversation. An unproven owner is conservatively visible to
+ * every chat until attribution lands; a proven worker never blocks an unrelated prime.
  */
 const running = new Set<CallContext>();
 const settling = new Set<CallContext>();
 let inFlightRequests = 0;
 
-export function inFlightToolCalls(conversationId: string | null = null): number {
+function countFor(calls: Iterable<CallContext>, conversationId: string | null): number {
   let count = 0;
-  const seen = new Set<CallContext>();
-  for (const call of running) seen.add(call);
-  for (const call of settling) seen.add(call);
-  for (const call of seen) {
+  for (const call of calls) {
     const owner = call.caller.conversationId;
     if (conversationId === null || owner === null || owner === conversationId) count += 1;
   }
   return count;
 }
 
+/** Requests still inside dispatch, and therefore still potentially doing tool work. */
+export function runningToolCalls(conversationId: string | null = null): number {
+  return countFor(running, conversationId);
+}
+
+/** Finished tool work whose unattributed durable record is still landing. */
+export function settlingToolCalls(conversationId: string | null = null): number {
+  return countFor(settling, conversationId);
+}
+
 /**
- * Keeps a finished call counted while its record is still being written.
+ * Conservative total used by diagnostics/tests that mean "not fully accounted for yet".
+ * A context can briefly appear in both sets during the handoff to recorder settling, so count
+ * the union rather than summing the two public projections.
+ */
+export function inFlightToolCalls(conversationId: string | null = null): number {
+  const seen = new Set<CallContext>();
+  for (const call of running) seen.add(call);
+  for (const call of settling) seen.add(call);
+  return countFor(seen, conversationId);
+}
+
+/**
+ * Keeps a finished call observable while its record is still being written.
  *
  * The unidentified path does not await its own recorder: the append may still spend a grace
  * window waiting for the page to name the conversation, and the model must not wait for
  * that. But the call is not settled either, and dropping it the moment the handler returned
  * left a window in which every chat read zero while an unattributed call was still landing —
- * the exact false zero the barrier cannot survive, and on a call whose owner is by
- * definition unknown, so it belonged to all of them.
+ * an attribution/recorder diagnostic would otherwise show a false zero. It is intentionally
+ * not part of `runningToolCalls()`: the handler has returned, so recorder bookkeeping cannot
+ * mutate the workspace the compaction barrier is trying to freeze.
  */
 export function holdWhileSettling(context: CallContext, work: Promise<unknown>): void {
   settling.add(context);

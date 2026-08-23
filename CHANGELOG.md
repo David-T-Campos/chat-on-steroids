@@ -16,6 +16,21 @@ review found four more ways the same two mechanisms could still be wrong. The ta
 artifacts stay where they are as the record of that commit, and this is the release.
 
 ### Fixed
+- **The PowerShell native-search normalizer now fails closed whenever its parser cannot prove
+  the command shape.** Backtick escapes are no longer split as if their escaped `;`, `|`, newline
+  or whitespace were real syntax; bracket classes such as `a[12]*.ts` are not "expanded" with
+  the brackets treated literally; and a leading dot follows shell glob rules instead of letting
+  `*.ts` silently include `.hidden.ts`. Ripgrep option arity is no longer guessed from a hand
+  table either: the known option set comes from the bundled binary's own help, and an unknown
+  option leaves the command untouched rather than risking a pattern/path swap such as
+  `rg --engine pcre2 foo.* src`.
+- **The exit-1 "no search matches" exemption no longer guesses through shell syntax or profile
+  shadowing.** A PowerShell backtick makes the lightweight status parser decline the exemption;
+  downstream pipeline stages are skipped only for a very small set of exact passive shapes,
+  rather than merely because their names are known cmdlets; and a profile-enabled shell no
+  longer treats bare `rg` / `rg.exe` as proof that ripgrep ran. PowerShell can define a function
+  under either name, so only a path-qualified executable (or a caller that explicitly disabled
+  profile loading) can earn the benign-exit classification in that case.
 - **A conditional chain no longer donates ripgrep's exit code to whatever actually failed.**
   `&&` and `||` were read as ordinary separators and the last statement taken as the command
   that set the exit code. On PowerShell 7, where those operators work, `cmd /c exit 1 && rg foo`
@@ -39,6 +54,28 @@ artifacts stay where they are as the record of that commit, and this is the rele
   blocked by work it has nothing to do with and cannot see. The count is per conversation now.
   A call whose chat is not yet proven still counts against every chat, which is the same
   conservative answer as before and the only safe one while its owner is unknown.
+- **Compact & Resume now fails closed on an unsettled or unobservable local machine, without
+  waiting on recorder bookkeeping that cannot mutate it.** If the chat's local request count is
+  still non-zero at the settle deadline, or the app cannot provide a valid count after bounded
+  retries, no handoff is submitted. A finished unattributed call may still spend the recorder's
+  correlation grace window waiting to be filed; `/activity` now exposes that separately as
+  `settlingTools` while `pendingTools` means requests still inside dispatch. This removes an
+  accidental ~15-second cross-chat compaction tax without turning "could not verify zero" into
+  success.
+- **Explicit shell requests execute the shell that was actually named or fail before running
+  anything.** An unknown/missing explicit shell no longer falls back to `cmd.exe`, and an
+  explicit `powershell` is never silently upgraded to `pwsh` (or vice versa). Path-like shell
+  values mean that exact file, including relative paths resolved against the command's own
+  `workdir`, so shell-language changes cannot hide behind fallback behavior.
+- **`read` now reports zero successful explicit targets as a failed call and records the count
+  it really read.** Partial multi-read remains useful, but two missing requested files are not a
+  healthy read merely because their `ERROR` sections were returned. Targets skipped after the
+  aggregate output cap are no longer counted as successful telemetry either.
+- **Unified `exec_command` uses the same child-environment contract as the other process paths.**
+  Connector/control-plane secrets are scrubbed before the model-run child inherits its
+  environment, the bundled ripgrep directory and irreducible Windows PATH entries are present,
+  and the existing dev-toolchain discovery extends that repaired environment instead of
+  rebuilding a subtly different one.
 
 ## [1.9.7] — 2026-08-23
 
@@ -82,6 +119,11 @@ nothing in that section has reached anyone yet. It ships here, together with the
   the fact.
 
 ### Internal
+- Pending-call accounting now spans the whole MCP request rather than only the handler body.
+  Calls waiting for late durable attribution remain observable in a dedicated recorder-settling
+  count after their result is released, while the compaction machine barrier consumes only the
+  still-dispatching count. This preserves the evidence needed to debug attribution gaps without
+  coupling a browser handoff deadline to `REQUEST_ID_GRACE_MS`.
 - The MCP shutdown test synchronises inside the PowerShell process it already started, instead of
   spawning a second `node` to write the file it waits for. 1.9.6 reintroduced that cold spawn and
   raised the wait to 15 seconds; on a hosted Windows runner the spawn outran the whole budget and

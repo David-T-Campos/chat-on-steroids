@@ -84,12 +84,14 @@ import {
 } from '../codex/tool-specs.js';
 import { lineDelta } from '../diffstat.js';
 import {
+  bindBundledRipgrep,
   execRecoveryHints,
   nonZeroExitIsBenign,
   normalizeShellCommand,
   withExecNotes
 } from '../exec-hints.js';
-import { normalizeEnvironment } from '../env.js';
+import { childEnv } from '../exec.js';
+import { locateRipgrep } from '../ripgrep.js';
 import { ensureDevToolchain } from '../toolchain.js';
 import {
   agentForCaller,
@@ -201,7 +203,15 @@ let toolchainLogged = false;
  * pager/colour contract is still the final word, exactly as it was before.
  */
 function execChildEnvironment(): NodeJS.ProcessEnv {
-  const env = normalizeEnvironment(process.env);
+  // Start from the one shared child-process environment contract. Rebuilding only the PATH
+  // casing fix here looked equivalent but quietly dropped two security/correctness guarantees
+  // that `childEnv()` already owns: connector secrets are stripped before the child can read
+  // them, and the bundled ripgrep directory is put on PATH (plus Windows' irreducible system
+  // paths are repaired when the parent environment is sparse). Unified exec used to bypass
+  // all three, so `exec_command` was the one launcher that could leak OPENAI_API_KEY and could
+  // fail to find the very rg binary the app ships. Extend the shared environment only with the
+  // dev-toolchain discovery that is specific to this surface.
+  const env = childEnv();
   const added = ensureDevToolchain(env);
   if (added.length > 0 && !toolchainLogged) {
     toolchainLogged = true;
@@ -303,6 +313,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           const images: Array<{ data: string; mimeType: string }> = [];
           let remaining = MAX_READ_BYTES;
           let failures = 0;
+          let successes = 0;
 
           for (const target of targets) {
             if (remaining <= 0) {
@@ -319,6 +330,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
                 maxBytes: Math.min(max_bytes ?? DEFAULT_READ_BYTES, remaining)
               });
               remaining -= section.bytes;
+              successes++;
               sections.push(section.text);
               if (section.image) images.push(section.image);
             } catch (err) {
@@ -330,8 +342,20 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           }
 
           logInfo(`tool read (${targets.length} target(s), ${failures} failed)`);
-          noteCount(targets.length);
+          // Count what was actually read, not every target that merely was not observed to
+          // fail. Once the aggregate output cap is exhausted the remaining targets are never
+          // attempted; `targets.length - failures` therefore counted those unread paths as
+          // successful results. That made session evidence claim more files than the response
+          // contained, which is especially misleading in the telemetry used to audit tool
+          // reliability. `successes` advances only after readOne returned a real section.
+          noteCount(successes);
           const text = [...sections, ...notes].join('\n\n');
+          // Partial multi-read is intentionally useful: one stale path must not discard the
+          // files that did resolve. But zero successful explicit targets is not a successful
+          // read. Returning ok(text) in that case made Activity record the call as healthy
+          // even though the model received nothing except ERROR sections, biasing the very
+          // error-rate telemetry used to find tool problems.
+          if (targets.length > 0 && failures === targets.length) return fail(text || 'Nothing could be read.');
           if (images.length === 0) return ok(text || 'Nothing to read.');
           return {
             content: [
@@ -562,16 +586,33 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
       async (input) =>
         reg.guarded('command', 'exec_command', async () => {
           const dir = await resolveCwd(ctx, input.workdir);
-          const shell = input.shell === undefined ? defaultUserShell() : getShellByModelProvidedPath(input.shell);
+          const shell = input.shell === undefined ? defaultUserShell() : getShellByModelProvidedPath(input.shell, dir.real);
+          if (!shell) {
+            return fail(
+              `SHELL_NOT_FOUND: the explicitly requested shell ${JSON.stringify(input.shell)} could not be resolved. ` +
+                'No command was run. Omit shell to use the configured default, or provide an existing recognised shell binary.'
+            );
+          }
           // Does only what the shell itself would have done — today, expanding a bare filename
           // glob PowerShell hands to a native program uninterpreted. Anything it does not
           // understand reaches the shell exactly as the model wrote it. The listing is read
           // lazily and only from the resolved workdir, so a command with no glob in it never
           // touches the disk here.
-          const normalized = normalizeShellCommand(input.cmd, shell.shellType, () =>
+          // PowerShell resolves profile functions/aliases before applications on PATH. The app
+          // deliberately ships ripgrep, parses rg's flags against that exact version, and puts
+          // it first on child PATH, so a profile-defined `rg` is not a harmless customization:
+          // it breaks the assumptions of the normalizer and makes exit-code attribution
+          // unknowable. Bind ordinary bare rg/ripgrep invocations to the shipped executable.
+          const boundCommand = bindBundledRipgrep(
+            input.cmd,
+            shell.shellType,
+            shell.shellType === 'powershell' ? locateRipgrep() : null
+          );
+          const normalized = normalizeShellCommand(boundCommand, shell.shellType, () =>
             nodeFs.readdirSync(dir.real)
           );
-          const command = deriveExecArgs(shell, normalized.cmd, input.login ?? true);
+          const useLoginShell = input.login ?? true;
+          const command = deriveExecArgs(shell, normalized.cmd, useLoginShell);
           const processId = unifiedExecManager.allocateProcessId();
           try {
             // Current Codex intercepts an explicit `apply_patch` shell invocation before spawning

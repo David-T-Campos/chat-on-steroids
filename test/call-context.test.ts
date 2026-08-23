@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   emptyEvidence,
   inFlightToolCalls,
+  runningToolCalls,
+  settlingToolCalls,
   trackInFlight,
   type CallContext
 } from '../src/main/mcp/call-context.js';
@@ -41,6 +43,8 @@ describe('local calls still running', () => {
     await whileRunning(worker, () => {
       expect(inFlightToolCalls('conversation-a')).toBe(0);
       expect(inFlightToolCalls('conversation-b')).toBe(1);
+      expect(runningToolCalls('conversation-b')).toBe(1);
+      expect(settlingToolCalls('conversation-b')).toBe(0);
     });
     expect(inFlightToolCalls('conversation-b')).toBe(0);
   });
@@ -64,6 +68,8 @@ describe('local calls still running', () => {
       expect(inFlightToolCalls('conversation-a')).toBe(1);
       expect(inFlightToolCalls('conversation-b')).toBe(1);
       expect(inFlightToolCalls(null)).toBe(1);
+      expect(runningToolCalls('conversation-a')).toBe(1);
+      expect(settlingToolCalls('conversation-a')).toBe(0);
     });
   });
 

@@ -500,6 +500,8 @@ describe('activity feed', () => {
     expect(reply.body.sessionId).toBe(sessionId);
     expect(reply.body.entries).toHaveLength(1);
     expect(reply.body.entries[0]).toMatchObject({ tool: 'read', requestId: 'wfr_activity_restart' });
+    expect(reply.body.pendingTools).toBe(0);
+    expect(reply.body.settlingTools).toBe(0);
     expect(liveConversations().some((entry) => entry.conversationId === conversationId)).toBe(true);
   });
 

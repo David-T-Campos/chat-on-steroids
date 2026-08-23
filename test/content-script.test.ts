@@ -6522,6 +6522,87 @@ describe('the Compact & resume control', () => {
     expect(live.sent.some((message) => message.type === 'compact' && message.cancel === true)).toBe(false);
   });
 
+  it('refuses to compact when a local tool is still running at the settle deadline', async () => {
+    let activityChecks = 0;
+    live = await harness(undefined, {
+      activity: () => {
+        activityChecks++;
+        return { ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 1, job: null } };
+      },
+      compact: () => ({ ok: true, data: { started: true, prompt: 'must never be requested' } })
+    });
+    live.hook.injectControl();
+    const sends = watchSend(live.document);
+
+    await live.hook.startCompact();
+
+    expect(activityChecks).toBeGreaterThan(1);
+    expect(startedCompactions(live)).toEqual([]);
+    expect(sends()).toBe(0);
+    expect(composerText(live.document)).toBe('');
+    expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('still running');
+  });
+
+  it('outlives the recorder attribution grace before declaring a finished call stuck', async () => {
+    // An unattributed call can be finished from ChatGPT's point of view while the app keeps
+    // it pending for up to 15 seconds so late request-id evidence can still attach its durable
+    // record to the right conversation. The compaction deadline used to be only 20 seconds,
+    // leaving almost no write/scheduling headroom and turning that normal recorder tail into
+    // a false refusal. Keep it busy for >20s, then clear it before the 30s deadline: this must
+    // still reach the actual compact request.
+    let polls = 0;
+    live = await harness(undefined, {
+      activity: () => ({
+        ok: true,
+        data: {
+          entries: [],
+          stream: [],
+          nextSince: 0,
+          pendingTools: ++polls <= 90 ? 1 : 0,
+          job: null
+        }
+      }),
+      compact: () => ({
+        ok: true,
+        data: {
+          started: true,
+          token: 'tok-recorder-tail',
+          prompt: 'Write the handoff brief.',
+          job: { sessionId: 's1', stage: 'handoff-pending', busy: true, handoffId: null, error: null }
+        }
+      })
+    });
+    live.hook.injectControl();
+    watchSend(live.document);
+
+    await live.hook.startCompact();
+
+    expect(polls).toBeGreaterThan(80);
+    expect(startedCompactions(live)).toHaveLength(1);
+    expect((live.document.querySelector('.clf-composer') as HTMLElement).dataset.clfMode).toBe('busy');
+  });
+
+  it('refuses to compact when the app cannot verify pending local tools', async () => {
+    let activityChecks = 0;
+    live = await harness(undefined, {
+      activity: () => {
+        activityChecks++;
+        return null;
+      },
+      compact: () => ({ ok: true, data: { started: true, prompt: 'must never be requested' } })
+    });
+    live.hook.injectControl();
+    const sends = watchSend(live.document);
+
+    await live.hook.startCompact();
+
+    expect(activityChecks).toBeGreaterThanOrEqual(3);
+    expect(startedCompactions(live)).toEqual([]);
+    expect(sends()).toBe(0);
+    expect(composerText(live.document)).toBe('');
+    expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('Could not verify');
+  });
+
   it('leaves the old chat alone and never opens a request at all when the turn will not stop', async () => {
     live = await harness(undefined, {
       compact: (message) => ({
@@ -6554,6 +6635,7 @@ describe('the Compact & resume control', () => {
 
   it('never overwrites a draft the user is writing', async () => {
     live = await harness(undefined, {
+      activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null } }),
       compact: (message) => ({
         ok: true,
         data: message.cancel
@@ -6578,14 +6660,36 @@ describe('the Compact & resume control', () => {
   });
 
   it('starts one job on a press and refuses a second press while it runs', async () => {
-    live = await harness();
-    live.reply.set('compact', () => ({
-      ok: true,
-      data: {
-        started: true,
-        job: { sessionId: 's1', stage: 'handoff-pending', busy: true, handoffId: null, error: null }
+    let started = false;
+    const pendingJob = { sessionId: 's1', stage: 'handoff-pending', busy: true, handoffId: null, error: null };
+    live = await harness(undefined, {
+      activity: () => ({
+        ok: true,
+        data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: started ? pendingJob : null }
+      })
+    });
+    live.reply.set('compact', (message) => {
+      if (message.cancel) {
+        started = false;
+        return {
+          ok: true,
+          data: {
+            cancelled: true,
+            job: { sessionId: 's1', stage: 'failed', busy: false, handoffId: null, error: 'cancelled' }
+          }
+        };
       }
-    }));
+      started = true;
+      return {
+        ok: true,
+        data: {
+          started: true,
+          token: 'tok-double-press',
+          prompt: 'Write the one handoff brief for this test.',
+          job: pendingJob
+        }
+      };
+    });
     live.hook.injectControl();
 
     const button = live.document.querySelector('.clf-compact-btn') as HTMLButtonElement;
@@ -6598,7 +6702,7 @@ describe('the Compact & resume control', () => {
 
     // The impatient second press. The control is now a cancel, so it must not start
     // another compaction — this is the click that used to fan out into several tabs.
-    button.click();
+    (live.document.querySelector('.clf-compact-btn') as HTMLButtonElement).click();
     await settle();
     const compacts = live.sent.filter((message) => message.type === 'compact');
     expect(compacts).toHaveLength(2);
@@ -6606,7 +6710,9 @@ describe('the Compact & resume control', () => {
   });
 
   it('shows why it could not start rather than silently doing nothing', async () => {
-    live = await harness();
+    live = await harness(undefined, {
+      activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null } })
+    });
     live.reply.set('compact', () => ({
       ok: false,
       status: 409,
@@ -7535,7 +7641,10 @@ describe('binding the brief to the generation that wrote it', () => {
    * because the app was saying all along that it still had a call running.
    */
   it('will not call a turn finished while the app still has a call running', async () => {
-    let pending = 1;
+    // The pre-compaction barrier itself must be clear. The pending call below belongs to the
+    // compaction turn after it has started, which is the later generation-settle gate this
+    // regression is about.
+    let pending = 0;
     live = await harness(`https://chatgpt.com/c/${CHAT}`, {
       ...compactionReplies(),
       activity: () => ({
@@ -7545,6 +7654,7 @@ describe('binding the brief to the generation that wrote it', () => {
     });
     live.hook.injectControl();
     await press(live);
+    pending = 1;
 
     // Twenty-eight characters and a tool call, exactly as it happened.
     const turn = assistantTurn(live.document, 'turn-brief', ['Reading the session!']);

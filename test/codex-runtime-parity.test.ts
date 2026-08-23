@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -17,7 +17,7 @@ import {
   WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS,
   clampYieldTime
 } from '../src/main/codex/unified-exec-constants.js';
-import { deriveExecArgs, getShell } from '../src/main/codex/shell.js';
+import { deriveExecArgs, getShell, getShellByModelProvidedPath } from '../src/main/codex/shell.js';
 import { terminateProcessTree } from '../src/main/exec.js';
 
 const truncationPolicy = { kind: 'tokens' as const, tokens: 10_000 };
@@ -70,6 +70,36 @@ describe('Codex unified exec runtime parity', () => {
       '-Command',
       "Write-Output 'x'"
     ]);
+  });
+
+  it.runIf(process.platform === 'win32')('keeps explicit powershell and pwsh names distinct', () => {
+    // Both executables share the internal `powershell` shell type, but they do not share a
+    // grammar. An explicit Windows PowerShell request must never be upgraded to pwsh merely
+    // because pwsh happens to appear first in the default-shell preference order.
+    const windowsPowerShell = getShellByModelProvidedPath('powershell');
+    expect(windowsPowerShell).not.toBeNull();
+    expect(path.basename(windowsPowerShell!.shellPath).toLowerCase()).toBe('powershell.exe');
+
+    const windowsPowerShellExe = getShellByModelProvidedPath('powershell.exe');
+    expect(windowsPowerShellExe).not.toBeNull();
+    expect(path.basename(windowsPowerShellExe!.shellPath).toLowerCase()).toBe('powershell.exe');
+
+    const pwsh = getShellByModelProvidedPath('pwsh');
+    if (pwsh) expect(path.basename(pwsh.shellPath).toLowerCase()).toBe('pwsh.exe');
+  });
+
+  it('resolves a relative explicit shell path against the command cwd, not the app cwd', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'clf-shell-cwd-'));
+    tempRoots.push(root);
+    const tools = path.join(root, 'tools');
+    await mkdir(tools, { recursive: true });
+    const shellFile = path.join(tools, process.platform === 'win32' ? 'powershell.exe' : 'bash');
+    await writeFile(shellFile, 'placeholder', 'utf8');
+
+    const relative = process.platform === 'win32' ? '.\\tools\\powershell.exe' : './tools/bash';
+    const resolved = getShellByModelProvidedPath(relative, root);
+    expect(resolved).not.toBeNull();
+    expect(path.normalize(resolved!.shellPath)).toBe(path.normalize(shellFile));
   });
 
   it('classifies a launch failure as CreateProcess, matching Codex', async () => {
