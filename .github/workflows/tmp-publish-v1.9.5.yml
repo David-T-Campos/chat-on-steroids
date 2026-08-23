@@ -1,0 +1,80 @@
+name: Temporary publish v1.9.5
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/tmp-publish-v1.9.5.yml'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET_SHA: 5d82f99fca17a53c59825e4807c15f3b43edb732
+      TAG: v1.9.5
+      ARTIFACT: chat-on-steroids-v1.9.5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Create release tag on the reviewed commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin "$TARGET_SHA"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            actual="$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')"
+            test "$actual" = "$TARGET_SHA" || { echo "Tag $TAG points to $actual, expected $TARGET_SHA"; exit 1; }
+          else
+            git tag "$TAG" "$TARGET_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+
+      - name: Build verified release candidate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --ref "$TAG"
+          run_id=""
+          for i in $(seq 1 30); do
+            run_id="$(gh run list --workflow release.yml --event workflow_dispatch --limit 30 --json databaseId,headSha,createdAt --jq ".[] | select(.headSha == \"$TARGET_SHA\") | .databaseId" | head -n 1)"
+            if [ -n "$run_id" ]; then break; fi
+            sleep 5
+          done
+          test -n "$run_id" || { echo "Could not find dispatched release workflow"; exit 1; }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          gh run watch "$run_id" --exit-status
+          rm -rf publish
+          mkdir publish
+          gh run download "$run_id" -n "$ARTIFACT" -D publish
+          ls -la publish
+
+      - name: Publish GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it."
+            exit 1
+          fi
+          cat > release-notes.md <<'EOF'
+          ## Chat On Steroids v1.9.5
+
+          ### Fixed
+          - Sub-agents now work immediately when multi-agent mode is enabled after app startup. The swarm durability sinks are wired for the full main-process lifetime, so the first `spawn` no longer fails its durable acceptance barrier.
+
+          ### Added
+          - Setup now includes a direct download button for the standalone Chrome companion extension.
+          - The app now clearly states that the companion extension must be loaded and connected for sub-agents to identify, open, and coordinate worker chats.
+
+          The release candidate was built and smoke-tested on native Windows x64 and ARM64 runners. `SHA256SUMS.txt` covers both installers and the extension ZIP.
+          EOF
+          gh release create "$TAG" publish/* --title "Chat On Steroids v1.9.5" --notes-file release-notes.md
