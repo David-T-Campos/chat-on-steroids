@@ -1,0 +1,128 @@
+name: Temporary publish v1.9.8
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/tmp-publish-v1.9.8.yml'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET_SHA: 81c1113c3af2b16ef025f5548c75c9f91e26f3e5
+      TAG: v1.9.8
+      ARTIFACT: chat-on-steroids-v1.9.8
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify the tag points at the reviewed commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          # An annotated tag resolves to a tag object, so compare the peeled ref: the
+          # commit the tag actually names, not the object that names it.
+          peeled="$(git ls-remote origin "refs/tags/$TAG^{}" | awk '{print $1}')"
+          if [ -z "$peeled" ]; then
+            peeled="$(git ls-remote origin "refs/tags/$TAG" | awk '{print $1}')"
+          fi
+          test -n "$peeled" || { echo "Tag $TAG does not exist on origin"; exit 1; }
+          test "$peeled" = "$TARGET_SHA" || { echo "Tag $TAG points at $peeled, expected $TARGET_SHA"; exit 1; }
+          echo "Tag $TAG confirmed at $TARGET_SHA"
+
+      - name: Build verified release candidate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --ref "$TAG"
+          run_id=""
+          for i in $(seq 1 30); do
+            run_id="$(gh run list --workflow release.yml --event workflow_dispatch --limit 30 --json databaseId,headSha --jq ".[] | select(.headSha == \"$TARGET_SHA\") | .databaseId" | head -n 1)"
+            if [ -n "$run_id" ]; then break; fi
+            sleep 5
+          done
+          test -n "$run_id" || { echo "Could not find dispatched release workflow"; exit 1; }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          gh run watch "$run_id" --exit-status
+          rm -rf publish
+          mkdir publish
+          gh run download "$run_id" -n "$ARTIFACT" -D publish
+          ls -la publish
+          cat publish/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it."
+            exit 1
+          fi
+          cat > release-notes.md <<'EOF'
+          Windows installers for both architectures are attached below. Download the one that
+          matches your PC, then **reload the browser extension** — the app and the extension are
+          versioned together and the app refuses a mismatched copy.
+
+          - `Chat-On-Steroids-Setup-x64.exe` — Intel/AMD
+          - `Chat-On-Steroids-Setup-arm64.exe` — Arm (Snapdragon, Surface Pro X)
+          - `Chat-On-Steroids-Extension.zip` — the extension on its own, for loading unpacked
+          - `SHA256SUMS.txt` — checksums for all three
+
+          This release supersedes 1.9.6 and 1.9.7, which were tagged and built but never published.
+
+          ## What changed
+
+          Exit code 1 from a search means "no matches", and 1.9.6 started recording that as a
+          result rather than an error. Proving the exit really came from ripgrep turned out to be
+          the hard part, and most of this release is that one problem.
+
+          **Searches are now bound to the ripgrep this app ships.** A command name is not proof of
+          what runs: PowerShell resolves functions and aliases ahead of applications, and
+          `-NoProfile` does not help — a function defined in the command text shadows the
+          executable anyway, `rg.exe` spelling included. Ordinary `rg` calls are now bound to the
+          shipped binary by absolute path, which is the same one the argument parser is built
+          against and the one already first on the child PATH.
+
+          **The argument parser stopped guessing.** Its ripgrep option table was written by hand
+          and was missing entries — `rg --engine pcre2 foo.* src` read `pcre2` as the search
+          pattern and expanded `foo.*` as a file path, asking a different question and answering
+          it successfully. The table now comes from the shipped binary's own help, and an
+          unrecognised option leaves the line untouched.
+
+          **It also stopped guessing at PowerShell it cannot read.** Backticks escape separators,
+          `#` starts a comment that can swallow a following statement, and here-strings carry
+          every separator the parser splits on. Any of those now switches off both rewriting and
+          exit-code inference. Bracket globs like `a[12]*.ts` are refused rather than matched as
+          literal brackets, and `*.ts` no longer quietly includes dotfiles.
+
+          **Compact & Resume stops trusting what it cannot verify.** Pending local work is counted
+          per chat, so one chat's long build no longer holds another chat's handoff open. A call
+          counts for its whole request instead of just its handler. And if work is still running
+          at the deadline — or the app cannot be asked — the compaction is refused instead of
+          proceeding without an answer.
+
+          **Security:** `exec_command` was the one process launcher that did not scrub connector
+          secrets from the child environment, so a command it ran could read `OPENAI_API_KEY`. It
+          now uses the same environment contract as every other launcher.
+
+          Also: an explicitly requested shell that cannot be resolved now fails the call instead of
+          quietly becoming `cmd.exe`, an explicit `powershell` is never silently upgraded to
+          `pwsh`, and a `read` whose every target failed is reported as a failure rather than a
+          success.
+
+          Built and smoke-tested on native Windows x64 and ARM64 runners, with the full
+          typecheck-and-test gate green on both.
+
+          > Beta despite the 1.x version number. Behaviour may still change between releases.
+          EOF
+          gh release create "$TAG" publish/* --title "Chat On Steroids v1.9.8" --notes-file release-notes.md
+          gh release view "$TAG" --json url --jq .url
