@@ -177,11 +177,20 @@ function splitTopLevel(command: string, seps: readonly string[]): string[] {
   return parts.filter((part) => part.trim() !== '');
 }
 
-/** The bare program name of a token, lowercased and stripped of path and `.exe`. */
+/**
+ * The bare program name of a token, lowercased and stripped of its path and `.exe`.
+ *
+ * `.exe` and nothing else. Everything this name is used to decide is a claim about a
+ * *program's* contract — ripgrep spending exit 1 on "no matches" — and `rg.cmd`, `rg.bat`
+ * or `rg.ps1` is a local script that merely happens to be named after it. A wrapper is free
+ * to exit 1 for its own reasons, and calling that ripgrep's no-match answer would launder
+ * exactly the failure this file exists to stop laundering. So an extension that is not
+ * `.exe` stays part of the name, which no set of known programs contains.
+ */
 function programName(token: Token | undefined): string {
   if (!token) return '';
   const tail = token.value.split(/[\\/]/).pop() ?? '';
-  return tail.toLowerCase().replace(/\.(exe|cmd|bat|ps1)$/, '');
+  return tail.toLowerCase().replace(/\.exe$/, '');
 }
 
 /**
@@ -256,7 +265,16 @@ function looksLikeCmdlet(token: Token | undefined): boolean {
  * exemption, and a real failure recorded as a failure is the outcome to fail towards.
  */
 export function statusDeterminingProgram(command: string): string {
-  const statements = splitTopLevel(command, [';', '&&', '||', '\n']);
+  // A conditional chain decides at run time which of its branches ran, and nothing in the
+  // text of it says which one did. `cmd /c exit 1 && rg foo` never reaches ripgrep at all —
+  // PowerShell 7 runs the operator, sees the failure and stops — and yet the last statement
+  // is still `rg foo`. Reading it would file that exit 1 as a search that found nothing.
+  //
+  // There is no program this can name honestly, so it names none, and the exemption that
+  // depends on the name is withheld. Windows PowerShell 5.1 refuses such a line outright and
+  // the output guard catches that; this is the shell where the operators actually work.
+  if (splitTopLevel(command, ['&&', '||']).length > 1) return '';
+  const statements = splitTopLevel(command, [';', '\n']);
   const last = statements[statements.length - 1];
   if (last === undefined) return '';
   const segments = splitTopLevel(last, ['|']);
@@ -357,6 +375,12 @@ const BRACE_ALTERNATIVES = /^([^{}$'"`|;]*)\{([^{}$'"`|;,]*(?:,[^{}$'"`|;,]*)+)\
  * Purely textual, exactly as the shell it stands in for: the names are not checked against
  * the disk, because bash does not check either and a caller who typed a path that is not
  * there is owed ripgrep's own "no such file" rather than a silently shortened list.
+ *
+ * Which is also why a group holding a wildcard is refused outright. bash expands braces and
+ * *then* expands the wildcards in what came out; this does only the first half, and quotes
+ * what it produces so it reaches the program verbatim. Half of a two-stage expansion is not
+ * a smaller fix, it is a worse failure: `{*.ts,*.js}` would become two quoted wildcards that
+ * ripgrep cannot open, where the untouched group at least fails as the shell's own.
  */
 function expandBraces(token: Token): string[] | null {
   if (token.quoted) return null;
@@ -366,7 +390,13 @@ function expandBraces(token: Token): string[] | null {
   const [, prefix = '', body = '', suffix = ''] = match;
   const parts = body.split(',');
   if (parts.length < 2 || parts.length > MAX_EXPANDED_NAMES) return null;
-  return parts.map((part) => `${prefix}${part}${suffix}`);
+  const names = parts.map((part) => `${prefix}${part}${suffix}`);
+  // The second stage is not ours to run, so a group that would still need it is not ours to
+  // touch. Both halves of the group are judged, not just the one that happens to carry the
+  // wildcard: expanding `{main,test/*}` partly would be the same trap. A bracket class is
+  // pathname expansion too — `{[ab].ts,c.ts}` needs the same second stage as a `*` does.
+  if (names.some((name) => /[*?[]/.test(name))) return null;
+  return names;
 }
 
 /**

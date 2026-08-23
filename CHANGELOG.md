@@ -9,6 +9,37 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [1.9.8] — 2026-08-23
+
+1.9.7 was tagged and its installers were built and checksummed, but it was never published:
+review found four more ways the same two mechanisms could still be wrong. The tag and its
+artifacts stay where they are as the record of that commit, and this is the release.
+
+### Fixed
+- **A conditional chain no longer donates ripgrep's exit code to whatever actually failed.**
+  `&&` and `||` were read as ordinary separators and the last statement taken as the command
+  that set the exit code. On PowerShell 7, where those operators work, `cmd /c exit 1 && rg foo`
+  never reaches ripgrep at all — and the exit 1 it really came from was filed as a search that
+  found nothing. Which branch ran is decided at run time and nothing in the text says which,
+  so a command line holding a top-level chain now names no program and keeps no exemption.
+- **A wrapper script named after a search program is no longer treated as one.** The program
+  name had `.cmd`, `.bat` and `.ps1` stripped along with `.exe`, so `rg.cmd`, `rg.bat` and
+  `.\rg.ps1` all answered to ripgrep's contract that exit 1 means "no matches". They are local
+  scripts free to exit 1 for their own reasons. Only the program itself — bare or `.exe` —
+  earns the exemption now.
+- **A brace group that still needs a glob stage is left alone instead of half-expanded.** bash
+  expands braces and *then* expands the wildcards in what came out. Only the first half happens
+  here, and what it produces is quoted so it reaches the program verbatim — so `{*.ts,*.js}`
+  became two quoted wildcards ripgrep cannot open, a worse failure than the untouched group.
+  Any alternative still holding `*`, `?` or a `[…]` class is now refused outright.
+- **One chat's tool call no longer holds another chat's compaction open.** The barrier that
+  waits for local work to settle before a handoff is written read a count of every call running
+  in the process. A swarm runs every chat through that one process, so a worker's long build
+  kept the prime's finished brief waiting until the watch expired and aborted the compaction —
+  blocked by work it has nothing to do with and cannot see. The count is per conversation now.
+  A call whose chat is not yet proven still counts against every chat, which is the same
+  conservative answer as before and the only safe one while its owner is unknown.
+
 ## [1.9.7] — 2026-08-23
 
 1.9.6 was tagged but never published: its CI run failed and the release job failed with it, so

@@ -107,7 +107,7 @@ export function runInCallContext<T>(context: CallContext, fn: () => T): T {
 }
 
 /**
- * Local tool calls this process is running right now.
+ * Local tool calls this process is running right now, for one chat.
  *
  * Needed by ChatGPT-native compaction. Interrupting the turn stops ChatGPT, but a call
  * already inside this process keeps going: a handoff written while a `run_powershell` or
@@ -115,14 +115,28 @@ export function runInCallContext<T>(context: CallContext, fn: () => T): T {
  * it is the *fresh* chat that then acts on the stale description. The page waits for this
  * to reach zero before it submits the handoff instruction.
  *
+ * Counted per conversation, because the wait is per conversation. A swarm runs several
+ * chats through one process, and a global count meant any worker's long build held the
+ * prime's settled brief busy until the watch expired and the compaction aborted — a chat
+ * blocked by work it has nothing to do with and cannot see. A call is only ever charged to
+ * the chat it was *proven* to come from; one whose conversation is still unknown is charged
+ * to every chat, which is the same conservative answer this gave before and the only safe
+ * one while its owner could still turn out to be the caller.
+ *
  * Lives here rather than in `tools.ts` so the bridge can read it without importing the
  * whole tool surface (and, through it, Electron).
  */
-let inFlight = 0;
+const running = new Set<CallContext>();
 let inFlightRequests = 0;
 
-export function inFlightToolCalls(): number {
-  return inFlight;
+export function inFlightToolCalls(conversationId: string | null = null): number {
+  if (conversationId === null) return running.size;
+  let count = 0;
+  for (const call of running) {
+    const owner = call.caller.conversationId;
+    if (owner === null || owner === conversationId) count += 1;
+  }
+  return count;
 }
 
 /**
@@ -143,13 +157,19 @@ export async function trackMcpRequest<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Counts one call for as long as it runs, however it ends. */
-export async function trackInFlight<T>(fn: () => Promise<T>): Promise<T> {
-  inFlight += 1;
+/**
+ * Counts one call for as long as it runs, however it ends.
+ *
+ * Takes the context rather than reading the async store, because it wraps `runInCallContext`
+ * rather than running inside it — and holding the object means a conversation identified
+ * part-way through the call is charged correctly from that moment on.
+ */
+export async function trackInFlight<T>(context: CallContext, fn: () => Promise<T>): Promise<T> {
+  running.add(context);
   try {
     return await fn();
   } finally {
-    inFlight -= 1;
+    running.delete(context);
   }
 }
 

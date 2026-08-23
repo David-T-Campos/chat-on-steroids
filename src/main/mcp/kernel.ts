@@ -438,7 +438,7 @@ async function dispatchTracked(
   // exact caller lookup timed out: its workspace is part of the requested operation. Falling
   // back to the first approved root turns an attribution outage into wrong-project mutation.
   // Refuse and let the model retry once page evidence is healthy instead.
-  const result = await trackInFlight(() =>
+  const result = await trackInFlight(context, () =>
     runInCallContext(context, () =>
       retiredWorker
         ? Promise.resolve(

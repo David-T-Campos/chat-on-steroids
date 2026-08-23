@@ -1047,10 +1047,12 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // How this chat's own Compact & Resume is going, so the page can say what is
         // happening instead of spinning.
         job: resumeJobFor(live.sessionId),
-        // Local calls still running in this process. ChatGPT-native compaction waits for
+        // Local calls still running for *this chat*. ChatGPT-native compaction waits for
         // this to reach zero after interrupting the turn, so the handoff is written about
-        // a settled machine rather than one mid-edit.
-        pendingTools: inFlightToolCalls(),
+        // a settled machine rather than one mid-edit. Scoped to the conversation, because a
+        // swarm runs several chats through one process: a global count let any worker's long
+        // build hold a settled brief busy until the watch expired and aborted the compaction.
+        pendingTools: inFlightToolCalls(live.conversationId),
         // The generation this chat currently has open, if it has one. A content script that
         // has just been reloaded into a turn already in flight adopts this instead of
         // minting a second id for the same run. See liveConversations().

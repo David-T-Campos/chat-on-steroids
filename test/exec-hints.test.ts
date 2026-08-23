@@ -85,10 +85,23 @@ describe('a non-zero exit that is a result rather than a failure', () => {
     expect(nonZeroExitIsBenign('.\\gradlew.bat :app:test', 1, output)).toBe(false);
   });
 
+  it('never exempts a conditional chain, because nothing says which branch ran', () => {
+    // PowerShell 7 runs `&&` for real: this one exits 1 from cmd and never reaches ripgrep,
+    // yet `rg foo` is still the last statement in the text. The 5.1 parser-error guard does
+    // not help here, because on 7 there is no parser error to see — the chain simply ran.
+    expect(statusDeterminingProgram('cmd /c exit 1 && rg foo')).toBe('');
+    expect(nonZeroExitIsBenign('cmd /c exit 1 && rg foo', 1, '')).toBe(false);
+    expect(nonZeroExitIsBenign('go build ./... || rg foo', 1, '')).toBe(false);
+    expect(nonZeroExitIsBenign('rg foo && go build ./...', 1, '')).toBe(false);
+    // A `;` chain is unconditional: every statement ran, so the last one is the answer.
+    expect(statusDeterminingProgram('cmd /c exit 1; rg foo')).toBe('rg');
+    expect(nonZeroExitIsBenign('cmd /c exit 1; rg foo', 1, '')).toBe(true);
+  });
+
   it('never exempts a command the shell refused to parse', () => {
     // Verified in Windows PowerShell 5.1 on this machine: `&&` is rejected outright, nothing
-    // runs, and the exit code is 1. statusDeterminingProgram still reads `rg` off the last
-    // statement, so without this guard a parser error was filed as a search finding nothing.
+    // runs, and the exit code is 1. This guard reads the shell's own diagnostic, so it holds
+    // even for a chain whose text would otherwise have ended in a search that found nothing.
     const parserError = [
       'At line:1 char:17',
       '+ Write-Output hi && rg foo',
@@ -222,6 +235,38 @@ describe('globs PowerShell will not expand for a native program', () => {
     for (const cmd of ["rg -n x 'src/{a,b}'", 'rg -n x src/{a}', 'rg -n x src/{$env:X,b}']) {
       expect(normalizeShellCommand(cmd, 'powershell', cwd).cmd).toBe(cmd);
     }
+  });
+
+  it('refuses a brace group whose alternatives would still need a glob stage', () => {
+    // bash expands braces and *then* expands the wildcards in what came out. Only the first
+    // half happens here, and what it produces is quoted so it reaches the program verbatim —
+    // so expanding this one would hand ripgrep two quoted wildcards it cannot open, which is
+    // a worse failure than the untouched group. Both alternatives are judged, not just the
+    // one carrying the wildcard.
+    for (const cmd of [
+      'rg -n x {*.ts,*.js}',
+      'rg -n x src/{main,test}/*.ts',
+      'rg -n x {main,test/*}',
+      'rg -n x {a,b?}',
+      'rg -n x {[ab].ts,c.ts}'
+    ]) {
+      const result = normalizeShellCommand(cmd, 'powershell', cwd);
+      expect(result.cmd).toBe(cmd);
+      expect(result.notes).toEqual([]);
+    }
+  });
+
+  it('does not read a wrapper script as the program whose exit code it trusts', () => {
+    // `rg.cmd`, `rg.bat` and `rg.ps1` are local scripts that happen to be named after
+    // ripgrep. Nothing about them promises exit 1 means "no matches", so the exemption that
+    // rests on that promise cannot be given to them. Only the program itself earns it.
+    for (const wrapper of ['.\\rg.ps1 foo', 'rg.cmd foo', 'rg.bat foo', 'C:\\tools\\rg.cmd foo']) {
+      expect(nonZeroExitIsBenign(wrapper, 1, '')).toBe(false);
+    }
+    // The real program still does, spelled either way.
+    expect(nonZeroExitIsBenign('rg foo', 1, '')).toBe(true);
+    expect(nonZeroExitIsBenign('C:\\tools\\rg.exe foo', 1, '')).toBe(true);
+    expect(statusDeterminingProgram('rg -n foo | rg.cmd bar')).toBe('rg.cmd');
   });
 
   it('expands braces after the first statement, where a glob would be left alone', () => {
