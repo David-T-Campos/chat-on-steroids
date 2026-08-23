@@ -85,6 +85,61 @@ describe('a non-zero exit that is a result rather than a failure', () => {
     expect(nonZeroExitIsBenign('.\\gradlew.bat :app:test', 1, output)).toBe(false);
   });
 
+  it('never answers a bracket class with the file that is literally named that', () => {
+    // The matcher escapes `[` and `]`, so this pattern would have matched the one file whose
+    // name really does contain the brackets — while the shell being stood in for means a
+    // character class and would have matched a1.ts and a2.ts. Expanding it is not a smaller
+    // answer, it is a different one, reported as success.
+    const list = (): readonly string[] => ['a1.ts', 'a2.ts', 'a[12]-literal.ts'];
+    const cmd = 'rg needle a[12]*.ts';
+    expect(normalizeShellCommand(cmd, 'powershell', list).cmd).toBe(cmd);
+    expect(normalizeShellCommand(cmd, 'powershell', list).notes).toEqual([]);
+  });
+
+  it('hides a leading dot from a pattern without one, and only then', () => {
+    // The POSIX rule the caller was writing to: `*.ts` skips dotfiles, `.h*.ts` asks for them.
+    const list = (): readonly string[] => ['.hidden.ts', 'plain.ts'];
+    expect(normalizeShellCommand('rg -n x *.ts', 'powershell', list).cmd).toBe("rg -n x 'plain.ts'");
+    expect(normalizeShellCommand('rg -n x .h*.ts', 'powershell', list).cmd).toBe("rg -n x '.hidden.ts'");
+  });
+
+  it('never rewrites a command whose option arity it cannot know', () => {
+    // The corruption this guard exists for: `--engine` consumes `pcre2`, which makes `foo.*`
+    // the *pattern*. Reading `--engine` as a switch instead made `pcre2` the pattern and
+    // `foo.*` a path — and expanding that path asked ripgrep a different question than the
+    // one that was typed, then reported success. Rewriting nothing is the only safe answer.
+    const list = (): readonly string[] => ['foo.js', 'other.ts'];
+    expect(normalizeShellCommand('rg --engine pcre2 foo.* src', 'powershell', list).cmd).toBe(
+      'rg --engine pcre2 foo.* src'
+    );
+    // Every flag known, so the same line normalizes as before.
+    expect(normalizeShellCommand('rg --engine=pcre2 x *.js', 'powershell', list).cmd).toBe(
+      "rg --engine=pcre2 x 'foo.js'"
+    );
+    // An option ripgrep does not have at all, and `--`, which changes what follows it.
+    expect(normalizeShellCommand('rg --not-a-real-flag x *.js', 'powershell', list).cmd).toBe(
+      'rg --not-a-real-flag x *.js'
+    );
+    expect(normalizeShellCommand('rg -- x *.js', 'powershell', list).cmd).toBe('rg -- x *.js');
+  });
+
+  it('only reads through pipeline stages that cannot decide the exit status', () => {
+    // Being a cmdlet is not enough. `Out-File` to a missing drive throws, exits the host with
+    // 1, and prints nothing the output guard recognises; `Write-Error` and a script block
+    // that calls `exit` do the same by other routes. Reading ripgrep's code through any of
+    // them files a real failure as a search that found nothing.
+    expect(statusDeterminingProgram("rg x src | Out-File -LiteralPath 'Z:\\missing\\x.txt'")).toBe('');
+    expect(statusDeterminingProgram('rg x src | Set-Content -LiteralPath Z:\\missing\\x.txt')).toBe('');
+    expect(statusDeterminingProgram('rg x src | ForEach-Object { exit 1 }')).toBe('');
+    expect(statusDeterminingProgram('rg x src | Write-Error boom')).toBe('');
+    expect(nonZeroExitIsBenign('rg x src | ForEach-Object { exit 1 }', 1, '')).toBe(false);
+    expect(nonZeroExitIsBenign("rg x src | Out-File -LiteralPath 'Z:\\missing\\x.txt'", 1, '')).toBe(false);
+    // The shapes the recorded sessions actually use to trim output still read through.
+    expect(statusDeterminingProgram('rg x src | Select-Object -First 5')).toBe('rg');
+    expect(statusDeterminingProgram('rg x src | Out-Null')).toBe('rg');
+    expect(statusDeterminingProgram('rg x src | sort | measure')).toBe('rg');
+  });
+
   it('never exempts a conditional chain, because nothing says which branch ran', () => {
     // PowerShell 7 runs `&&` for real: this one exits 1 from cmd and never reaches ripgrep,
     // yet `rg foo` is still the last statement in the text. The 5.1 parser-error guard does
@@ -149,8 +204,6 @@ describe('a non-zero exit that is a result rather than a failure', () => {
     // The exemption has to survive, or the benign-exit rule stops firing on the real corpus:
     // these are the stage heads that actually follow a search in recorded sessions.
     expect(statusDeterminingProgram('rg x src | Select-Object -First 5')).toBe('rg');
-    expect(statusDeterminingProgram('rg x src | Where-Object { $_ } | Format-Table')).toBe('rg');
-    expect(statusDeterminingProgram('rg x src | ForEach-Object { $_ } | Out-Null')).toBe('rg');
     expect(nonZeroExitIsBenign('rg x src | Sort-Object | Measure-Object', 1, '')).toBe(true);
   });
 

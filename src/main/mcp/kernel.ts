@@ -57,6 +57,7 @@ import {
   currentCall,
   emptyEvidence,
   noteOutcome,
+  holdWhileSettling,
   runInCallContext,
   trackInFlight,
   trackMcpRequest,
@@ -361,10 +362,27 @@ async function dispatch(
   surface: SurfaceId,
   run: () => Promise<ToolResult>
 ): Promise<ToolResult> {
-  return trackMcpRequest(() => dispatchTracked(name, args, transportKey, requestId, surface, run));
+  // The context is built here, one layer out from where the work happens, because the
+  // compaction barrier asks about the whole request and not just the handler. A call is
+  // still unsettled while it waits for its request-id evidence, while its outcome is being
+  // recorded, and while its result is on the way back — and a handoff written in any of
+  // those gaps describes a machine that has not finished changing. The counter therefore
+  // opens with the request and closes with it.
+  const context: CallContext = {
+    startedAt: Date.now(),
+    transportKey,
+    agent: null,
+    caller: { transportKey, requestId, conversationId: null },
+    outcome: null,
+    evidence: emptyEvidence()
+  };
+  return trackMcpRequest(() =>
+    trackInFlight(context, () => dispatchTracked(context, name, args, transportKey, requestId, surface, run))
+  );
 }
 
 async function dispatchTracked(
+  context: CallContext,
   name: string,
   args: unknown,
   transportKey: string | null,
@@ -378,15 +396,7 @@ async function dispatchTracked(
   // question the setup screen has to answer honestly.
   surfaceToolCallAt.set(surface, Date.now());
   const isFinish = isFinishCall(name, args);
-  const startedAt = Date.now();
-  const context: CallContext = {
-    startedAt,
-    transportKey,
-    agent: null,
-    caller: { transportKey, requestId, conversationId: null },
-    outcome: null,
-    evidence: emptyEvidence()
-  };
+  const startedAt = context.startedAt;
   // Cheap, non-blocking ingress identity. When the page has already reported this exact
   // request id, identity-sensitive handlers (workspace/session/agents) see it before they
   // touch state. If the page is one tick late this stays null; only handlers that actually
@@ -438,8 +448,7 @@ async function dispatchTracked(
   // exact caller lookup timed out: its workspace is part of the requested operation. Falling
   // back to the first approved root turns an attribution outage into wrong-project mutation.
   // Refuse and let the model retry once page evidence is healthy instead.
-  const result = await trackInFlight(context, () =>
-    runInCallContext(context, () =>
+  const result = await runInCallContext(context, () =>
       retiredWorker
         ? Promise.resolve(
             fail(
@@ -461,7 +470,6 @@ async function dispatchTracked(
             )
           )
         : run()
-    )
   );
   // Identity, once, from this call's own evidence — see callerConversation. `agents` has
   // already established its own inside the call and adopted it, and re-reading here would
@@ -512,7 +520,7 @@ async function dispatchTracked(
   // broken history never breaks the tool itself. Only the degraded/unidentified path remains
   // fire-and-forget because it may still spend a grace window waiting for page evidence.
   if (context.caller.conversationId) await recording;
-  else void recording;
+  else holdWhileSettling(context, recording);
   // Retire a completed run only after this call has had every chance to acknowledge and
   // receive its inbox. Doing it inside acknowledgeOffers would let `agents status` destroy
   // the run halfway through identifying itself; here the handler and result are already done.

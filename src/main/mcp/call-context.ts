@@ -127,16 +127,37 @@ export function runInCallContext<T>(context: CallContext, fn: () => T): T {
  * whole tool surface (and, through it, Electron).
  */
 const running = new Set<CallContext>();
+const settling = new Set<CallContext>();
 let inFlightRequests = 0;
 
 export function inFlightToolCalls(conversationId: string | null = null): number {
-  if (conversationId === null) return running.size;
   let count = 0;
-  for (const call of running) {
+  const seen = new Set<CallContext>();
+  for (const call of running) seen.add(call);
+  for (const call of settling) seen.add(call);
+  for (const call of seen) {
     const owner = call.caller.conversationId;
-    if (owner === null || owner === conversationId) count += 1;
+    if (conversationId === null || owner === null || owner === conversationId) count += 1;
   }
   return count;
+}
+
+/**
+ * Keeps a finished call counted while its record is still being written.
+ *
+ * The unidentified path does not await its own recorder: the append may still spend a grace
+ * window waiting for the page to name the conversation, and the model must not wait for
+ * that. But the call is not settled either, and dropping it the moment the handler returned
+ * left a window in which every chat read zero while an unattributed call was still landing —
+ * the exact false zero the barrier cannot survive, and on a call whose owner is by
+ * definition unknown, so it belonged to all of them.
+ */
+export function holdWhileSettling(context: CallContext, work: Promise<unknown>): void {
+  settling.add(context);
+  void work.then(
+    () => settling.delete(context),
+    () => settling.delete(context)
+  );
 }
 
 /**

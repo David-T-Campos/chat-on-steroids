@@ -64,13 +64,48 @@ const RIPGREP_NAMES = new Set(['rg', 'ripgrep']);
  * Needed so a glob that is already a flag's *value* is never mistaken for a path operand
  * and rewritten a second time — `-g *.md` must survive this file untouched.
  */
+/**
+ * ripgrep's own option table, derived from `rg --help` of the binary this app ships
+ * (15.2.0) rather than from memory.
+ *
+ * Getting this wrong is not a failed call, it is a changed one. A flag that consumes the
+ * next argument and is not listed here makes that argument look like the search pattern,
+ * which makes the *pattern* look like a path — and a path is what this file expands. The
+ * live example was `rg --engine pcre2 foo.* src`: with `--engine` unknown, `pcre2` was read
+ * as the pattern and `foo.*` was expanded against the working directory, so ripgrep was
+ * asked a different question than the one that was typed and answered it successfully.
+ *
+ * So both halves are listed, and anything in neither is unknown arity: the segment is then
+ * left exactly as written. Rewriting nothing is always a safe answer; guessing is not.
+ */
 const RG_VALUE_FLAGS = new Set([
-  '-e', '--regexp', '-g', '--glob', '--iglob', '-t', '--type', '-T', '--type-not',
-  '-m', '--max-count', '-A', '--after-context', '-B', '--before-context', '-C', '--context',
-  '--max-depth', '--maxdepth', '--max-filesize', '-f', '--file', '--pre', '--sort', '--sortr',
-  '-M', '--max-columns', '--colors', '-E', '--encoding', '--ignore-file', '--type-add',
-  '--path-separator', '-j', '--threads', '-r', '--replace', '--field-context-separator',
-  '--field-match-separator', '--context-separator', '--hostname-bin'
+  '--after-context', '--before-context', '--color', '--colors', '--context',
+  '--context-separator', '--dfa-size-limit', '--encoding', '--engine',
+  '--field-context-separator', '--field-match-separator', '--file', '--generate', '--glob',
+  '--hostname-bin', '--hyperlink-format', '--iglob', '--ignore-file', '--max-columns',
+  '--max-count', '--max-depth', '--max-filesize', '--path-separator', '--pre', '--pre-glob',
+  '--regex-size-limit', '--regexp', '--replace', '--sort', '--sortr', '--threads', '--type',
+  '--type-add', '--type-clear', '--type-not', '-A', '-B', '-C', '-E', '-M', '-T', '-d', '-e',
+  '-f', '-g', '-j', '-m', '-r', '-t'
+]);
+
+const RG_BOOLEAN_FLAGS = new Set([
+  '--auto-hybrid-regex', '--binary', '--block-buffered', '--byte-offset', '--case-sensitive',
+  '--column', '--count', '--count-matches', '--crlf', '--debug', '--files',
+  '--files-with-matches', '--files-without-match', '--fixed-strings', '--follow',
+  '--glob-case-insensitive', '--heading', '--help', '--hidden', '--ignore-case',
+  '--ignore-file-case-insensitive', '--include-zero', '--invert-match', '--json',
+  '--line-buffered', '--line-number', '--line-regexp', '--max-columns-preview', '--mmap',
+  '--multiline', '--multiline-dotall', '--no-config', '--no-filename', '--no-ignore',
+  '--no-ignore-dot', '--no-ignore-exclude', '--no-ignore-files', '--no-ignore-global',
+  '--no-ignore-messages', '--no-ignore-parent', '--no-ignore-vcs', '--no-line-number',
+  '--no-messages', '--no-pcre2-unicode', '--no-require-git', '--no-unicode', '--null',
+  '--null-data', '--one-file-system', '--only-matching', '--passthru', '--pcre2',
+  '--pcre2-version', '--pretty', '--quiet', '--search-zip', '--smart-case', '--sort-files',
+  '--stats', '--stop-on-nonmatch', '--text', '--trace', '--trim', '--type-list',
+  '--unrestricted', '--version', '--vimgrep', '--with-filename', '--word-regexp', '-.', '-0',
+  '-F', '-H', '-I', '-L', '-N', '-P', '-S', '-U', '-V', '-a', '-b', '-c', '-h', '-i', '-l', '-n',
+  '-o', '-p', '-q', '-s', '-u', '-v', '-w', '-x', '-z'
 ]);
 
 /**
@@ -248,6 +283,32 @@ function looksLikeCmdlet(token: Token | undefined): boolean {
 }
 
 /**
+ * Downstream pipeline stages that cannot decide what the shell exits with.
+ *
+ * Being a cmdlet is not enough, which is what this replaced. `Out-File -LiteralPath
+ * 'Z:\missing\x.txt'` is a known cmdlet, carries no script block, throws
+ * DriveNotFoundException and exits the host with status 1 — and no diagnostic the output
+ * guard knows appears. Skipping it and reading the exit code off ripgrep upstream would file
+ * that as a search that found nothing. `Write-Error` and `ForEach-Object { exit 1 }` do the
+ * same thing by other routes.
+ *
+ * So nothing is skipped on the strength of its name. These are the exact shapes the recorded
+ * sessions actually use to trim ripgrep's output, each argument-free or fixed enough to have
+ * nothing left to fail at. Anything else — a cmdlet with arguments, an expression, a block —
+ * is status-ambiguous, and an ambiguous stage means no exemption for the line.
+ */
+const PASSIVE_STAGES = [
+  /^(?:select-object|select)\s+-(?:first|last)\s+\d+$/i,
+  /^(?:sort-object|sort)$/i,
+  /^(?:measure-object|measure)$/i,
+  /^out-null$/i
+];
+
+function stageIsPassive(segment: string): boolean {
+  return PASSIVE_STAGES.some((shape) => shape.test(segment));
+}
+
+/**
  * The program whose exit status the shell will report.
  *
  * PowerShell sets `$LASTEXITCODE` from the last *native* program it ran — the last one in
@@ -279,8 +340,12 @@ export function statusDeterminingProgram(command: string): string {
   if (last === undefined) return '';
   const segments = splitTopLevel(last, ['|']);
   for (let i = segments.length - 1; i > 0; i--) {
-    const first = tokenize(segments[i] as string)[0];
-    if (!looksLikeCmdlet(first)) return programName(first);
+    const segment = (segments[i] as string).trim();
+    if (stageIsPassive(segment)) continue;
+    const first = tokenize(segment)[0];
+    // A program here set $LASTEXITCODE and is the answer; a cmdlet here could have decided
+    // the status without touching it, and cannot be proven not to have.
+    return looksLikeCmdlet(first) ? '' : programName(first);
   }
   const generator = segments[0];
   if (generator === undefined) return '';
@@ -347,8 +412,13 @@ export interface NormalizedCommand {
 function isExpandableGlob(token: Token): boolean {
   if (token.quoted) return false;
   if (!/[*?]/.test(token.value)) return false;
-  if (/[\\/]/.test(token.value)) return false;
+  if (/[\/]/.test(token.value)) return false;
   if (token.value.startsWith('-')) return false;
+  // A bracket class is pathname expansion this does not implement — the matcher below escapes
+  // `[` and `]` into literals, so `a[12]*.ts` would match a file actually *named* with those
+  // brackets while the shell would have matched `a1.ts` and `a2.ts`. Answering a different
+  // question and reporting success is worse than not answering, so it is not answered.
+  if (/[[\]]/.test(token.value)) return false;
   // `$env:X` and other expansions are the shell's business, not ours.
   return !token.value.includes('$');
 }
@@ -415,7 +485,7 @@ export type DirectoryLister = () => readonly string[];
  *
  * Only the current directory, because that is the only scope a separator-free glob can mean —
  * and the whole reason this is expansion rather than a `-g` filter. Leading dots are excluded
- * on the POSIX rule the caller was writing to.
+ * unless the pattern itself begins with one, which is the POSIX rule the caller was writing to.
  *
  * An empty result is not an expansion. A shell that matches nothing passes the pattern
  * through untouched, and so does this: the command then fails exactly as it would have, and
@@ -435,7 +505,12 @@ function expandGlob(pattern: string, list: DirectoryLister): string[] | null {
   // Case-insensitively, which is how Windows matches filenames and therefore how the shell
   // being stood in for would have matched them.
   const matcher = new RegExp(`^${source}$`, 'i');
-  const hits = entries.filter((entry) => !entry.startsWith('.') && matcher.test(entry)).sort();
+  // POSIX hides a leading dot from a pattern that does not have one, and only then. A
+  // pattern written with the dot is asking for those files by name.
+  const hidden = pattern.startsWith('.');
+  const hits = entries
+    .filter((entry) => (hidden || !entry.startsWith('.')) && matcher.test(entry))
+    .sort();
   if (hits.length === 0 || hits.length > MAX_EXPANDED_NAMES) return null;
   return hits;
 }
@@ -468,6 +543,11 @@ function normalizeRipgrepSegment(
     }
     if (token.value.startsWith('-')) {
       const flag = token.value.split('=')[0] as string;
+      // An option this table does not know may or may not swallow the next argument, and
+      // the two readings disagree about which token is the pattern and which is a path.
+      // Neither reading is safe to act on, so nothing in this segment is rewritten. `--`
+      // and a bare `-` land here too, and mean their own things; the same answer serves.
+      if (!RG_VALUE_FLAGS.has(flag) && !RG_BOOLEAN_FLAGS.has(flag)) return { segment, notes: [] };
       // `--glob=*.md` carries its value inline and consumes nothing after it.
       if (RG_VALUE_FLAGS.has(token.value) && !token.value.includes('=')) skipValue = true;
       if (RG_PATTERN_FLAGS.has(flag) || RG_NO_PATTERN_FLAGS.has(flag)) seenPattern = true;
