@@ -11,6 +11,7 @@
  */
 
 import { getConfig } from '../config.js';
+import { isGitRepository } from '../toolchain.js';
 import type { ToolContext } from './kernel.js';
 import { surfaceDefinition, type SurfaceId } from './surfaces.js';
 
@@ -22,10 +23,14 @@ function coreInstructions(ctx: ToolContext): string {
   const config = getConfig();
   const sessionTools = ctx.sessionTools ?? config.sessions.record;
   const agentTools = ctx.agentTools ?? config.multiAgent.enabled;
+  // Marked here rather than discovered by the model: `git status` in a folder that is not a
+  // repository was one of the most repeated recoverable failures in the recorded sessions,
+  // and the answer is one stat the model has no way to perform. Only repositories are
+  // labelled, so the line stays short on the common case where every root is one.
   const roots =
     ctx.roots.length === 0
       ? 'None yet — the user must approve a folder in the Chat On Steroids app.'
-      : ctx.roots.map((r) => `/${r.name}`).join('  ');
+      : ctx.roots.map((r) => `/${r.name}${isGitRepository(r.path) ? ' (git)' : ''}`).join('  ');
 
   const mode = ctx.readOnly
     ? 'Read only. Nothing here can modify anything.'
@@ -45,7 +50,10 @@ function coreInstructions(ctx: ToolContext): string {
     // across read, find, exec_command and apply_patch alike, and repeating it per tool would
     // cost more context than the shorthand saves.
     'Once you use a full path, this chat remembers that project, and later paths may be relative to it: /project/src/main.ts, then src/other.ts. Use a full path again to move to another project. If a relative path is refused, this chat has no folder yet — use a full one.',
-    'read takes several paths at once, lists a folder, expands globs and returns images — use one call, not five. Line ranges are the exception: start_line/end_line require exactly one path.',
+    'read takes several paths at once, lists a folder, expands globs and returns images — use one call, not five. A start_line/end_line range applies to every file the call reads.',
+    // The gap that produced the most repeated shell failures: a POSIX shell expands globs
+    // before the program runs and PowerShell does not, so the program receives the asterisk.
+    'PowerShell does not expand * or ? for native programs. Pass ripgrep filename patterns as -g \'*.go\', and expand other globs with Get-ChildItem before use.',
     'Never send read’s line-number prefixes to apply_patch; they are display metadata, not file content.',
     'apply_patch is the only way to change files: it adds, updates, moves and deletes, and it is atomic across files.',
     'exec_command runs git, npm, builds, tests and anything else; a long-running one gives you a session_id to continue with write_stdin.',

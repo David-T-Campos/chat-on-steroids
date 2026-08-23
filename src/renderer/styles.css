@@ -2015,6 +2015,14 @@ input.num {
   font-weight: 600;
 }
 
+/* A setup step that silently does nothing when skipped — sub-agents without the companion
+   extension. Uses the same --red as the error surfaces so it reads as a prerequisite rather
+   than as decoration, and it stays legible in both themes because --red is defined per theme. */
+.hint.is-required {
+  color: var(--red);
+  font-weight: 600;
+}
+
 .foot.is-warn {
   color: var(--red);
 }

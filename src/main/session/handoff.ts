@@ -26,6 +26,46 @@ export interface CreateHandoffInput {
   sourceTokens?: number;
 }
 
+/**
+ * The shortest a brief may be before it is refused, for any session at all.
+ *
+ * Far below what the brief rules ask for — they target 10,000-30,000 tokens — because this
+ * is not a quality bar. It is the line under which a document cannot be a handoff of
+ * anything, whatever the session held.
+ */
+const MIN_BRIEF_CHARS = 200;
+/** Above this much recorded context, a session's brief has real work to describe. */
+const SUBSTANTIAL_SESSION_TOKENS = 20_000;
+/** The floor that applies to those sessions. Still roughly a fortieth of the target. */
+const MIN_SUBSTANTIAL_BRIEF_CHARS = 1_000;
+
+/**
+ * Why this text cannot be the brief for this session, or null if it can.
+ *
+ * Nothing downstream checks a brief. The chat that receives one has no way to tell a whole
+ * handoff from the first line of one and acts on it either way, which is what makes a
+ * truncated capture so much worse than a failed one. On 2026-08-23 a compaction turn was
+ * declared finished 28 characters in and the app stored `TASK`, a newline and
+ * `Continue implementing ` as the handoff for a session holding 455 events and 318,422
+ * tokens; the replacement chat asked its own session for the handoff history, was told the
+ * session had no recorded events, and rebuilt the work off the filesystem.
+ *
+ * The page-side settle window is what stops that happening. This is the floor underneath it,
+ * and refusing here is cheap: a refused compaction leaves the user in the chat they were
+ * already in, with the reason on screen and the button still there.
+ */
+export function briefShortfall(text: string, sourceTokens: number): string | null {
+  const brief = text.trim();
+  if (!brief) return 'ChatGPT answered the compaction request with nothing.';
+  if (brief.length < MIN_BRIEF_CHARS) {
+    return `ChatGPT wrote only ${brief.length} characters before its compaction turn looked finished, which is too little to continue any session from.`;
+  }
+  if (sourceTokens >= SUBSTANTIAL_SESSION_TOKENS && brief.length < MIN_SUBSTANTIAL_BRIEF_CHARS) {
+    return `The brief is ${brief.length} characters for a session carrying about ${Math.round(sourceTokens / 1000)}k tokens of work, so it cannot be the whole handoff.`;
+  }
+  return null;
+}
+
 /** A fresh, unique handoff id. Never taken from a caller, and never from a model. */
 export function newHandoffId(now: Date = new Date()): string {
   return `${now.toISOString().slice(0, 10)}-${randomUUID().slice(0, 8)}`;
@@ -43,6 +83,11 @@ export async function createHandoff(input: CreateHandoffInput): Promise<Handoff>
   if (!text) throw new Error('A handoff cannot be empty');
   const summary = await getSession(input.sessionId);
   if (!summary) throw new Error('That session no longer exists');
+  // Checked again here, and not only at the bridge route that can word the refusal well,
+  // because this is the one function that writes a handoff to disk. A stub that reaches the
+  // store is indistinguishable from a real brief for the rest of its life.
+  const shortfall = briefShortfall(text, input.sourceTokens ?? summary.estimatedTokens);
+  if (shortfall) throw new Error(shortfall);
   const handoff: Handoff = {
     id: newHandoffId(),
     sessionId: input.sessionId,

@@ -68,7 +68,7 @@ const {
 } = await import(
   '../src/main/agents.js'
 );
-const { makeTempDir, removeTempDir } = await import('./helpers.js');
+const { makeTempDir, removeTempDir, SAMPLE_BRIEF } = await import('./helpers.js');
 
 const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop';
 /** The chat that spawns the swarm in these tests: only a proven conversation can. */
@@ -83,7 +83,11 @@ const PRIME_CHAT = 'c-prime-bridge';
  */
 async function readyContinuation(sessionId: string, brief: string, from = 'c-compacted'): Promise<string> {
   const opened = openContinuation(sessionId, from);
-  const stored = await attachSummary(opened.token, brief);
+  // The caller's line is what its assertions look for; the rest is there because the app
+  // refuses a brief too short to have carried a session across. See SAMPLE_BRIEF.
+  const stored = await attachSummary(opened.token, `${brief}
+
+${SAMPLE_BRIEF}`);
   expect(stored, 'the brief was not stored, so there is no resume to queue').not.toBeNull();
   return opened.token;
 }
@@ -1028,7 +1032,7 @@ describe('delivering a bootstrap', () => {
   it('names the chat it opened after the work, not after the bootstrap it typed', async () => {
     await pair();
     const source = await createSession({ title: 'Harden the MCP workflows' });
-    const command = queueResume(source.id, await readyContinuation(source.id, 'carry on with the MCP work'))!;
+    const command = queueResume(source.id, await readyContinuation(source.id, 'carry on'))!;
     await redeem(command.id);
     const conversationId = 'cccccccc-dddd-eeee-ffff-000000000000';
     await request('POST', '/commands/ack', { body: { id: command.id, status: 'sent', conversationId } });

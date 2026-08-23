@@ -228,6 +228,14 @@ export function noteExec(result: {
   exitCode: number | null;
   timedOut?: boolean;
   durationMs?: number;
+  /**
+   * The caller has proven this non-zero exit is a reported result, not a failure.
+   *
+   * Only `exec_command` can know this, because only it has the command line: `rg` spends
+   * exit 1 on "no matches". Left false everywhere else, so `write_stdin` and every older
+   * call site keep the original behaviour exactly.
+   */
+  benignExit?: boolean;
 }): void {
   const store = storage.getStore();
   if (!store) return;
@@ -238,7 +246,14 @@ export function noteExec(result: {
   // failed build was being stored beside a successful one with nothing to tell them apart.
   // A still-running process has `exitCode === null` and has not failed yet; leave it alone,
   // and never overwrite an outcome a tool set deliberately.
-  if (!store.outcome && (result.timedOut === true || (result.exitCode !== null && result.exitCode !== 0))) {
+  //
+  // The `benignExit` exemption is narrow and deliberate: a non-zero exit that the caller
+  // proved is a *result* would otherwise make the error count uninterpretable, which is the
+  // opposite of what marking failures was for. A timeout is never exempt — it is a failure
+  // whatever the program's exit convention says.
+  const failed = result.timedOut === true || (result.exitCode !== null && result.exitCode !== 0);
+  const exempt = result.benignExit === true && result.timedOut !== true;
+  if (!store.outcome && failed && !exempt) {
     store.outcome = 'error';
   }
 }

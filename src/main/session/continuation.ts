@@ -64,6 +64,7 @@ import { moveChatWorkspace } from '../workspace.js';
 import { writeDurableNow, writeDurableSoon } from '../durable.js';
 import { createHandoff } from './handoff.js';
 import { rebindConversation } from './recorder.js';
+import { endResumeClaim, noteResumeClaim, resetResumeGate } from './resume-gate.js';
 import { findSessionByConversation, getSession, readHandoff, rebindSession } from './store.js';
 
 /**
@@ -198,6 +199,10 @@ async function changedNow(): Promise<void> {
 }
 
 function publishRecord(entry: Continuation, record: ContinuationRecord): void {
+  // Terminal either way, so nothing is still opening a chat for this transaction. The gate
+  // self-expires regardless; releasing it here just stops an unrelated brand-new chat from
+  // waiting out a window that is already over.
+  if (record.state === 'committed' || record.state === 'aborted') endResumeClaim(entry.token);
   entry.to = record.to;
   entry.state = record.state;
   entry.summary = record.summary;
@@ -529,6 +534,7 @@ export function claimContinuation(token: string, claimant: string): { summary: s
   if (entry.state === 'awaiting-chat' || entry.state === 'claimed') {
     entry.claimedBy = claimant;
     entry.state = 'claimed';
+    noteResumeClaim(entry.token);
     changed();
   }
   // Anything further along — `committing` — keeps its state and is answered read-only.
@@ -550,6 +556,10 @@ export async function claimContinuationNow(token: string, claimant: string): Pro
   } else if (entry.state === 'claimed' && entry.claimedBy === null) {
     await transitionNow(entry, (current) => ({ ...current, claimedBy: claimant }));
   }
+  // After the transition, never before it. A throw here leaves nothing claimed, and arming
+  // first would have made every unrelated new chat wait out the window for a claim that
+  // does not exist.
+  if (entry.state === 'claimed') noteResumeClaim(entry.token);
   // A same-owner redeem racing a commit is read-only. `committing` remains monotonic.
   return { summary: entry.summary };
 }
@@ -800,6 +810,7 @@ export function abortContinuation(token: string, reason: string): boolean {
   if (entry.state === 'committed' || entry.state === 'aborted') return false;
   entry.state = 'aborted';
   entry.error = reason;
+  endResumeClaim(entry.token);
   cancelPrimeTransfer(entry.from);
   changed();
   logWarn(`continuation ${entry.token.slice(0, 8)} abandoned — ${reason}`);
@@ -910,6 +921,13 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
         beginPrimeTransfer(entry.from);
       }
     }
+    // A continuation recovered still holding its claim is a move that has not landed yet, and
+    // the replacement chat may be sitting in a tab about to report in. Nothing re-arms the
+    // gate on its own — the claim that armed it happened in a process that is gone — so the
+    // collision it exists to prevent would be wide open for exactly the restart that is most
+    // likely to hit it. Re-armed from now rather than from the original claim, because what
+    // matters is how long from *here* that chat still has to appear.
+    if (entry.state === 'claimed') noteResumeClaim(entry.token);
     byToken.set(entry.token, entry);
   }
   try {
@@ -927,5 +945,9 @@ export function resetContinuationsForTests(): void {
   openingBySession.clear();
   commitLocks.clear();
   recoveryHooks = {};
+  // The gate is part of this module's state even though it lives next door, and a claim
+  // outlives a cleared transaction by RESUME_CLAIM_WINDOW_MS. Left behind, it makes the
+  // *next* test's unrelated new chat wait for a replacement that will never come.
+  resetResumeGate();
   changed();
 }

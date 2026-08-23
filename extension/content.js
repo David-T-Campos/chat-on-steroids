@@ -1295,8 +1295,9 @@
     // The compaction turn settling is the moment the brief exists. Read here, from this
     // generation's own section, while `ended` still names it — a tick later the page is just
     // a transcript again and this answer is indistinguishable from any other.
-    if (endedTurnId && compactCapture && compactCapture.generation === endedTurnId) {
-      void deliverBrief(finalAnswerText(ended), result.outcome);
+    if (endedTurnId && compactCapture && compactCapture.generation === endedTurnId && !compactCapture.settling) {
+      compactCapture.settling = true;
+      void settleBrief(ended, result.outcome);
     }
     turnStartedAt = 0;
     genNode = null;
@@ -5215,6 +5216,140 @@
     if (held) await ask({ type: 'compact', conversationId, cancel: true }).catch(() => undefined);
     renderControl();
     void pullActivity();
+  }
+
+  /**
+   * How long everything about the turn has to stop changing before it is taken to be finished.
+   *
+   * Longer than TURN_SETTLE_MS by a wide margin, and deliberately so: the whole reason this
+   * exists is that four seconds of one signal was not evidence. A compaction turn that really
+   * did finish pays this once.
+   */
+  const BRIEF_STABLE_MS = 15_000;
+  /** How often a settling brief is re-read. */
+  const BRIEF_POLL_MS = 1_000;
+  /** The ceiling on watching one brief settle, after which it is given up on honestly. */
+  const BRIEF_WATCH_MS = 10 * 60_000;
+
+  /**
+   * Everything this generation has written so far, re-read rather than remembered.
+   *
+   * The snapshot `finishGeneration` hands over is a set of DOM nodes, and ChatGPT can
+   * remount the section it was writing into while it is still writing. That freezes the
+   * snapshot at whatever it held at the remount, which would read as a brief that has
+   * stopped growing. The transcript's newest assistant answer is the same answer when it
+   * still begins with everything already read; nothing else on screen can satisfy that, so
+   * the prefix is the identity proof and no separate id is needed.
+   *
+   * Never shrinks. A section torn down after the answer was complete would otherwise read
+   * as the brief being retracted, and a shorter text is never the better evidence.
+   */
+  function briefSoFar(ended, known) {
+    const held = finalAnswerText(ended);
+    if (held.length > known.length) return held;
+    const turns = CLF_DOM.turns();
+    const latest = turns.length > 0 ? finalAnswerText(turns[turns.length - 1]) : '';
+    if (known && latest.length > known.length && latest.startsWith(known)) return latest;
+    return held.length >= known.length ? held : known;
+  }
+
+  /**
+   * One reading of everything about this turn that moves while ChatGPT is still working.
+   *
+   * Prose is not the only thing a turn produces, and during the phase that caused all of this
+   * it is the one thing that does *not* move: the model had written 28 characters and spent
+   * the next seven minutes making tool calls. Watching the text alone would have found it
+   * perfectly stable and handed over those 28 characters, so the tool rail is read too — how
+   * many blocks the turn has, and how much each of them currently renders. A call starting, a
+   * result streaming in, a block finishing: each of them changes this string.
+   *
+   * Read from the live transcript as well as from `ended`, because a remount detaches the
+   * snapshot's nodes and a detached node stops changing for the least interesting reason.
+   */
+  function briefActivityMark(ended) {
+    const turns = CLF_DOM.turns();
+    const live = turns.length > 0 ? turns[turns.length - 1] : null;
+    const seen = [];
+    for (const turn of live && (!ended || live.node !== ended.node) ? [ended, live] : [ended]) {
+      if (!turn) continue;
+      const blocks = CLF_DOM.toolBlocks(turn);
+      seen.push(blocks.length);
+      for (const block of blocks) seen.push((block.textContent || '').length);
+    }
+    return seen.join(',');
+  }
+
+  /**
+   * Waits for the brief to stop being written before handing it over.
+   *
+   * `turn_end` is not proof that ChatGPT finished writing. The quiet heuristic that produces
+   * it reads exactly one thing — the stop control staying gone for TURN_SETTLE_MS — and a
+   * long agentic turn makes that control flicker between phases. On 2026-08-23 that closed a
+   * compaction turn 28 characters into its brief: the app stored `TASK`, a newline and
+   * `Continue implementing ` as a whole handoff for a session holding 455 events and 318,422
+   * tokens, opened the replacement chat with it, and the conversation it had just declared
+   * finished went on making tool calls for another seven minutes. The replacement chat could
+   * not tell that document from a complete one — no receiver can — and rebuilt the work from
+   * the filesystem instead.
+   *
+   * So the settled answer is where this starts, not what it delivers. Four signals have to
+   * agree, and hold agreeing for BRIEF_STABLE_MS, before the brief is taken to be the whole
+   * brief: the stop control absent, the answer text no longer growing, the turn's tool rail
+   * no longer moving, and the app reporting no local call still running.
+   *
+   * Every one of the first three can be fooled on its own, and the fourth is why it is here.
+   * The stop control flickers between phases. The text was frozen at 28 characters for seven
+   * minutes. A tool rail goes still in the gap between two calls — and stiller still *during*
+   * one: a build running for three minutes renders one block that does not change a
+   * character, so the whole page looks exactly like a finished turn. Only the app knows the
+   * connector is still holding that call open, and it is the one participant that cannot be
+   * fooled by what the page happens to be rendering.
+   *
+   * An unanswerable app is therefore not zero. `peekPendingTools` returns null when it could
+   * not ask, and reading that as "nothing is running" is precisely the inference that lost a
+   * session; it counts as busy and the watch keeps waiting. Nothing is lost by that: an app
+   * that cannot be asked is an app the brief could not have been delivered to either.
+   *
+   * The window only ever delays a handover; it cannot produce a brief that was not written.
+   * A turn that really did finish pays it once, in seconds, against a whole session.
+   */
+  async function settleBrief(ended, outcome) {
+    // Waiting cannot turn a turn that was cut short into one that finished, and what such a
+    // turn left on screen is not a brief. Refused on its outcome, exactly as before.
+    if (outcome === 'stopped' || outcome === 'interrupted' || outcome === 'failed') {
+      return void (await deliverBrief('', outcome));
+    }
+    const deadline = Date.now() + BRIEF_WATCH_MS;
+    let text = finalAnswerText(ended);
+    let activity = briefActivityMark(ended);
+    let stableSince = Date.now();
+    while (Date.now() < deadline) {
+      await sleep(BRIEF_POLL_MS);
+      // A navigation, a reload or the app withdrawing the transaction has already released
+      // the capture and told the user why. There is nothing left to deliver against.
+      if (!alive || !sameChat() || !compactCapture) return;
+      const nextText = briefSoFar(ended, text);
+      const nextActivity = briefActivityMark(ended);
+      const pending = await peekPendingTools();
+      // Asking took a round trip, and the page may have moved on underneath it.
+      if (!alive || !sameChat() || !compactCapture) return;
+      // Any of these on its own is enough. The stop control being back needs no
+      // corroborating — whatever `turn_end` concluded, the turn is demonstrably still
+      // running — and neither does a call the app says it is still holding open.
+      const busy = CLF_DOM.generating() || pending === null || pending > 0;
+      if (busy || nextText !== text || nextActivity !== activity) {
+        text = nextText;
+        activity = nextActivity;
+        stableSince = Date.now();
+        continue;
+      }
+      if (Date.now() - stableSince >= BRIEF_STABLE_MS) return void (await deliverBrief(text, outcome));
+    }
+    await abandonCapture(
+      'The compaction turn was still going long after it looked finished — still writing, still running ' +
+        'tools, or the app could not be reached to ask — so the app stopped waiting rather than hand over ' +
+        'half a brief. Nothing was compacted; this chat still has its session. Press Compact & Resume again.'
+    );
   }
 
   /**

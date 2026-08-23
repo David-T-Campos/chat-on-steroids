@@ -360,7 +360,11 @@ async function settleTurn(harnessed: Harness): Promise<void> {
   await settle();
   harnessed.advance(harnessed.hook.TURN_SETTLE_MS);
   harnessed.hook.observe();
-  await settle();
+  // A compaction turn ending starts a second, longer watch — the brief has to stop changing
+  // and the app has to say it has nothing running — and that watch runs off the script's own
+  // sleeps, which this harness makes instant while still advancing the clock. Draining them
+  // is what makes this helper mean "the turn really ended" for the brief as well.
+  await settle(800);
 }
 
 /** What is sitting in the composer right now. */
@@ -7449,6 +7453,13 @@ describe('binding the brief to the generation that wrote it', () => {
       data: message.cancel
         ? { cancelled: true }
         : { started: true, token: TOKEN, prompt: 'Write the brief …', job: null }
+    }),
+    // A reachable app with nothing running. Required, not decoration: settling the brief
+    // asks this every second, and an app that does not answer is treated as one still
+    // holding a call open rather than as one with nothing to report.
+    activity: () => ({
+      ok: true,
+      data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null }
     })
   });
 
@@ -7508,6 +7519,107 @@ describe('binding the brief to the generation that wrote it', () => {
     expect(briefs[0]!.summary).toContain('TASK — finish the rewrite.');
     expect(briefs[0]!.summary).not.toContain('One moment while I put this together.');
     expect(withdrawn(live)).toEqual([]);
+  });
+
+  /**
+   * The failure of 2026-08-23, reproduced.
+   *
+   * `turn_end` fired 28 characters into the brief because the stop control had been gone for
+   * four seconds between two phases of an agentic turn. What followed was seven minutes of
+   * tool calls and then the rest of the document — but the page, for long stretches of it,
+   * looked exactly like a finished turn: no stop control, no new prose, and one tool block
+   * rendering the same characters while the connector held the call open.
+   *
+   * So this asserts the negative first and for a long time. Thirty seconds of a page that
+   * looks finished, twice over the settle window, and nothing may be handed to the app —
+   * because the app was saying all along that it still had a call running.
+   */
+  it('will not call a turn finished while the app still has a call running', async () => {
+    let pending = 1;
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+      ...compactionReplies(),
+      activity: () => ({
+        ok: true,
+        data: { entries: [], stream: [], nextSince: 0, pendingTools: pending, job: null }
+      })
+    });
+    live.hook.injectControl();
+    await press(live);
+
+    // Twenty-eight characters and a tool call, exactly as it happened.
+    const turn = assistantTurn(live.document, 'turn-brief', ['Reading the session!']);
+    assistantProse(live.document, turn, 'a-1', 'TASK\nContinue implementing `');
+    await settleTurn(live);
+
+    // Nothing moves on screen for many times the settle window. The stop control is gone,
+    // the prose is frozen, the tool block renders the same text throughout — and every poll
+    // of the watch pushes the clock another second forward.
+    expect(delivered(live)).toEqual([]);
+    expect(withdrawn(live)).toEqual([]);
+
+    // The call lands, and the model writes the document it was actually asked for.
+    pending = 0;
+    assistantProse(live.document, turn, 'a-2', 'TASK — finish the rewrite.\nNEXT — run the tests.');
+    await settle(800);
+
+    const briefs = delivered(live);
+    expect(briefs).toHaveLength(1);
+    expect(briefs[0]!.summary).toContain('NEXT — run the tests.');
+  });
+
+  it('treats an app that cannot be asked as busy rather than as idle', async () => {
+    // Null is not zero. Reading "I could not ask" as "nothing is running" is the inference
+    // that shipped 28 characters as a whole handoff.
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+      ...compactionReplies(),
+      activity: () => undefined
+    });
+    live.hook.injectControl();
+    await press(live);
+
+    const turn = assistantTurn(live.document, 'turn-brief', []);
+    assistantProse(live.document, turn, 'a-1', 'TASK — finish the rewrite.');
+    await settleTurn(live);
+    expect(delivered(live)).toEqual([]);
+  });
+
+  it('keeps waiting while the tool rail is still moving', async () => {
+    // The other half of the same turn. Between two calls the app legitimately reports zero,
+    // and the only thing still saying the turn is going is the page filling in. Every poll
+    // of the watch advances the clock a second here, so counting polls is counting seconds:
+    // a block every fifth one is a call every five seconds, well inside the settle window.
+    let polls = 0;
+    let rail: (() => void) | null = null;
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+      ...compactionReplies(),
+      activity: () => {
+        if (++polls % 5 === 0) rail?.();
+        return { ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null } };
+      }
+    });
+    live.hook.injectControl();
+    await press(live);
+
+    const turn = assistantTurn(live.document, 'turn-brief', ['Reading the session!']);
+    assistantProse(live.document, turn, 'a-1', 'TASK\nContinue implementing `');
+    let blocks = 0;
+    let railing = true;
+    rail = () => {
+      if (railing) turn.append(toolBlock(live!.document, `Ran a command ${blocks++}`));
+    };
+    await settleTurn(live);
+
+    // A turn that never once looked finished for long enough, for as long as it kept going.
+    expect(blocks).toBeGreaterThan(5);
+    expect(delivered(live)).toEqual([]);
+
+    // The rail stops, the document arrives, and only now does the watch settle.
+    railing = false;
+    assistantProse(live.document, turn, 'a-2', 'TASK — finish the rewrite.\nNEXT — run the tests.');
+    await settle(800);
+    const briefs = delivered(live);
+    expect(briefs).toHaveLength(1);
+    expect(briefs[0]!.summary).toContain('NEXT — run the tests.');
   });
 
   it('hands the brief over once, however many times the turn is observed', async () => {

@@ -48,6 +48,7 @@ import {
 } from './session/store.js';
 import { inFlightMcpRequests, inFlightToolCalls } from './mcp/call-context.js';
 import { nativeHandoffPrompt } from './session/handoff-prompt.js';
+import { briefShortfall } from './session/handoff.js';
 import {
   agentForConversation,
   bindConversation,
@@ -1154,7 +1155,35 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       const token = typeof body['token'] === 'string' ? body['token'] : '';
       const entry = continuationByToken(token);
       if (!entry || entry.sessionId !== sessionId) return json(res, 409, { error: 'no_such_continuation' }, origin);
-      const handoff = await attachSummary(token, boundBrief(String(body['summary'])));
+      const brief = boundBrief(String(body['summary']));
+      // Refused here rather than deeper, because this is where the reason can still be said
+      // in words the page will put on screen. A brief that cannot be a brief is a failed
+      // compaction, and a failed compaction leaves the session exactly where it is — which
+      // is strictly better than moving it into a chat that was handed half a document and
+      // has no way to know it. See briefShortfall.
+      // Only the brief that would actually be stored is judged. Once a continuation holds
+      // one, a retry's text is discarded in favour of it, so refusing that text would refuse
+      // a capture that already succeeded.
+      const source = known ?? (await getSession(sessionId));
+      const shortfall = entry.handoffId ? null : briefShortfall(brief, source?.estimatedTokens ?? 0);
+      if (shortfall) {
+        logWarn(`bridge: refused the compaction brief for ${sessionId} — ${shortfall}`);
+        await cancelResumeNow(sessionId).catch((err: Error) =>
+          logWarn(`bridge: could not withdraw the refused compaction for ${sessionId} — ${err.message}`)
+        );
+        return json(
+          res,
+          409,
+          {
+            error: 'brief_incomplete',
+            message: `${shortfall} Nothing was compacted — this chat still has its session.`,
+            sessionId,
+            job: resumeJobFor(sessionId)
+          },
+          origin
+        );
+      }
+      const handoff = await attachSummary(token, brief);
       if (!handoff) {
         return json(
           res,

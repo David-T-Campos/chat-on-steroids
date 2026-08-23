@@ -62,6 +62,7 @@ import {
   requestCorrelation,
   resetCorrelationRegistryForTests,
 } from './correlation.js';
+import { resumeOpeningChat } from './resume-gate.js';
 import { summarizeToolCall } from './summarize.js';
 
 interface LiveConversation {
@@ -211,6 +212,23 @@ export async function restoreRecordedConversation(conversationId: string): Promi
   return sessionForConversation(conversationId);
 }
 
+/**
+ * How long to let a resume's commit land before recording a conversation it may be about to
+ * claim. Generous next to the milliseconds a commit actually takes, and bounded because a
+ * commit that never lands must not stop the chat being recorded at all.
+ */
+const RESUME_COMMIT_SETTLE_MS = 5_000;
+
+async function settleResumeCommit(): Promise<void> {
+  const deadline = Date.now() + RESUME_COMMIT_SETTLE_MS;
+  while (resumeOpeningChat() && Date.now() < deadline) {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 50);
+      timer.unref?.();
+    });
+  }
+}
+
 async function initializeSessionForConversation(
   conversationId: string | null,
   title?: string
@@ -226,7 +244,23 @@ async function initializeSessionForConversation(
   }
   // Reuse a session already recorded for this conversation, so closing and reopening
   // the tab continues the same history instead of fragmenting it.
-  const known = await findSessionByConversation(conversationId);
+  let known = await findSessionByConversation(conversationId);
+  if (!known && resumeOpeningChat()) {
+    // A compaction is opening its replacement chat right now, and this unknown conversation
+    // may be it. Creating a session here is what breaks the move: the commit that follows
+    // finds its own destination owned by a session it has never heard of and refuses to
+    // rebind. Waiting is cheap and lossless — the commit is already in flight and takes
+    // milliseconds, after which this conversation resolves to the session that was moved
+    // onto it and the batch that triggered this is recorded in the right place. See
+    // resume-gate.ts for what this cost the session it was written for.
+    await settleResumeCommit();
+    const moved = conversations.get(conversationId);
+    if (moved) {
+      lastActiveSessionId = moved.sessionId;
+      return moved.sessionId;
+    }
+    known = await findSessionByConversation(conversationId);
+  }
   // A chat this app opened is named for the command that opened it. The alternative —
   // the first thing said in the chat — is this app's own bootstrap prompt.
   const origin = pendingOrigins.get(conversationId) ?? null;

@@ -13,11 +13,6 @@ import {
 import { IS_WINDOWS } from './helpers.js';
 
 describe.runIf(IS_WINDOWS)('desktop helper', () => {
-  async function availableWindowId(): Promise<number | null> {
-    const { windows } = await listWindows();
-    return windows.find((window) => window.state !== 'minimized')?.id ?? windows[0]?.id ?? null;
-  }
-
   it('starts once and serves repeated window queries', async () => {
     const first = await listWindows();
     const second = await listWindows();
@@ -83,9 +78,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('returns a Codex-style window state with semantic UI refs', async () => {
-    const window = await availableWindowId();
-    if (window === null) return;
-    const state = await getWindowState({ window, includeScreenshot: false, maxElements: 8 });
+    const state = await getWindowState({ includeScreenshot: false, maxElements: 8 });
     expect(state.window.id).toBeGreaterThan(0);
     expect(state.screenshot).toBeNull();
     expect(state.elements.length).toBeLessThanOrEqual(8);
@@ -160,9 +153,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     // A competing capture is fired while get_window_state is mid-acquisition. The state
     // it returns must describe one moment: centres computed against its own screenshot,
     // never against the frame the interloper installed.
-    const window = await availableWindowId();
-    if (window === null) return;
-    const statePromise = getWindowState({ window, includeScreenshot: true, maxWidth: 640, maxElements: 12 });
+    const statePromise = getWindowState({ includeScreenshot: true, maxWidth: 640, maxElements: 12 });
     const interloper = screenshot({ maxWidth: 320 });
     const [state, other] = await Promise.all([statePromise, interloper]);
 
@@ -170,7 +161,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     const shot = state.screenshot!;
     // Different capture, therefore a different region and scale to be mapped against.
     expect(shot.frameId).not.toBe(other.frameId);
-    if (state.elements.length === 0) return;
+    expect(state.elements.length).toBeGreaterThan(0);
 
     let checked = 0;
     for (const element of state.elements) {
@@ -193,9 +184,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   it('refuses a ref minted before the desktop helper restarted', async () => {
     // A UI Automation runtime id is meaningless to a different helper process, so acting
     // on one would target whatever now holds that id rather than what the model saw.
-    const window = await availableWindowId();
-    if (window === null) return;
-    const state = await getWindowState({ window, includeScreenshot: false, maxElements: 4 });
+    const state = await getWindowState({ includeScreenshot: false, maxElements: 4 });
     const live = state.elements.find((element) => element.ref.startsWith('g'));
     if (!live) return;
     const older = live.ref.replace(/^g(\d+)/, (_match, gen: string) => `g${Number(gen) - 1}`);

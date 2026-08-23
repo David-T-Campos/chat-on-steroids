@@ -808,7 +808,9 @@ describe('2025-era clients', () => {
     });
     const instructions: string = reply.body.result.instructions ?? '';
     expect(instructions).toContain('/workspace');
-    expect(instructions).toContain('start_line/end_line require exactly one path');
+    expect(instructions).toContain('start_line/end_line range applies to every file the call reads');
+    // The Windows glob gap, taught once here because it is what most shell retries were for.
+    expect(instructions).toContain('PowerShell does not expand * or ? for native programs');
     // Progress guidance lives once at server level rather than bloating every tool description.
     expect(instructions).toContain('Keep the user visibly informed more than usual while you work');
     // Short enough not to burn the model's context on every conversation.
@@ -1445,31 +1447,50 @@ describe('bounded output', () => {
     expect(text).toContain('continue from line 6');
   });
 
-  it('refuses a line range it cannot honour rather than silently dropping it', async () => {
-    // This must be discoverable before the model spends a failed call. The runtime refusal
-    // below is the safety net; the advertised contract is what prevents the routine failure.
+  it('honours a line range across every file it read, and says that it did', async () => {
+    // The advertised contract has to match the runtime one, or the model learns the rule
+    // from a failed call instead of from the tool list.
     const readTool = toolList(await core('tools/list')).find((tool) => tool.name === 'read')!;
-    expect(String(readTool.description)).toMatch(/Line ranges.*exactly one path/i);
-    expect(String(readTool.inputSchema.properties.start_line.description)).toMatch(/exactly one file/i);
-    expect(String(readTool.inputSchema.properties.end_line.description)).toMatch(/exactly one file/i);
+    expect(String(readTool.description)).toMatch(/range applies to every file/i);
+    expect(String(readTool.inputSchema.properties.start_line.description)).toMatch(/every file/i);
+    expect(String(readTool.inputSchema.properties.end_line.description)).toMatch(/every file/i);
 
-    // Live, this returned both files from line 1 until the byte cap with no hint that the
-    // range had been discarded — a valid-looking call quietly changing what it means.
+    // Refusing this was the single largest source of rejected calls in the recorded
+    // sessions, and every one of them was a caller that had already said what it wanted.
+    // The original objection was to dropping the range *silently* — so it is applied and
+    // announced. What must never come back is a reply that looks like a whole-file read.
     const many = await core('tools/call', {
       name: 'read',
-      arguments: { paths: ['/workspace/notes.txt', '/workspace/src/app.ts'], start_line: 75, end_line: 90 }
+      arguments: { paths: ['/workspace/notes.txt', '/workspace/src/app.ts'], start_line: 10, end_line: 12 }
     });
-    expect(failed(many)).toBe(true);
-    expect(textOf(many)).toContain('INVALID_ARGUMENT');
-    expect(textOf(many)).toContain('start_line/end_line');
+    expect(failed(many)).toBe(false);
+    const text = textOf(many);
+    expect(text).toContain('note line 10');
+    expect(text).toContain('note line 12');
+    expect(text).not.toContain('note line 9');
+    expect(text).not.toContain('note line 13');
+    // Announced in the body, and restated by the header of every section.
+    expect(text).toMatch(/applied to each of the 2 files/i);
+    expect(text).toMatch(/\/workspace\/notes\.txt — lines 10-12/);
+    // The property the original refusal existed to protect: a file with nothing in that
+    // range says so outright, so a short file can never read as a complete one.
+    expect(text).toMatch(/\/workspace\/src\/app\.ts — no lines in that range/);
 
-    // A glob is the usual way one path turns into several, so it is checked after expansion.
+    // A glob is the usual way one path turns into several, so it must behave identically.
     const glob = await core('tools/call', {
       name: 'read',
-      arguments: { paths: ['/workspace/src/**/*.ts'], start_line: 1 }
+      arguments: { paths: ['/workspace/src/**/*.ts'], start_line: 1, end_line: 1 }
     });
-    expect(failed(glob)).toBe(true);
-    expect(textOf(glob)).toContain('INVALID_ARGUMENT');
+    expect(failed(glob)).toBe(false);
+    expect(textOf(glob)).toMatch(/lines 1-1/);
+
+    // One path is still one path: nothing is announced when there was nothing to spread.
+    const single = await core('tools/call', {
+      name: 'read',
+      arguments: { paths: ['/workspace/notes.txt'], start_line: 10, end_line: 12 }
+    });
+    expect(textOf(single)).not.toMatch(/applied to each/i);
+    expect(textOf(single)).toContain('note line 10');
   });
 
   it('reports the total when the whole file was read', async () => {

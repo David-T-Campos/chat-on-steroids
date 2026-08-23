@@ -15,7 +15,7 @@
  * and the wrong one won.
  */
 
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   applyEnvOverrides,
   deleteEnvValue,
@@ -26,6 +26,7 @@ import {
   prependPath,
   setEnvValue
 } from '../src/main/env.js';
+import { ensureDevToolchain, resetToolchainCache, type ToolchainProbe } from '../src/main/toolchain.js';
 
 /** A Windows environment as Windows actually spells it. */
 const windowsEnv = (): Record<string, string> => ({
@@ -144,5 +145,152 @@ describe.runIf(process.platform === 'win32')('a parent whose own path is unusabl
     expect(entries).toContain('c:\\windows\\system32\\windowspowershell\\v1.0');
     expect(new Set(entries).size).toBe(entries.length);
     expect(pathKeys(env)).toEqual(['Path']);
+  });
+});
+
+/**
+ * A toolchain the machine has but never put on the path.
+ *
+ * `ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH` was the
+ * most repeated *recoverable* shell failure in the recorded sessions, and it was never an
+ * inheritance bug: on a machine where Android Studio is the only JDK, nothing ever exports
+ * JAVA_HOME. The model recovered every time by prefixing the variable by hand, which means
+ * the answer was available all along and the round trip bought nothing.
+ *
+ * The risk being guarded here is redirecting a build that was already fine. Filling in a
+ * variable is only safe while it is strictly additive, so the negatives below — an existing
+ * value, a java already on PATH — matter more than the positive.
+ */
+describe.runIf(process.platform === 'win32')('an unset developer toolchain', () => {
+  beforeEach(() => resetToolchainCache());
+
+  /** A machine with Android Studio's bundled runtime and nothing else. */
+  const studioProbe: ToolchainProbe = {
+    isFile: (target) => target === 'C:\\Program Files\\Android\\Android Studio\\jbr\\bin\\java.exe',
+    directories: () => []
+  };
+
+  const bareEnv = (): Record<string, string> => ({
+    Path: 'C:\\Windows\\System32',
+    SystemRoot: 'C:\\Windows',
+    ProgramFiles: 'C:\\Program Files'
+  });
+
+  it('fills in JAVA_HOME and its bin directory when java is unreachable', () => {
+    const env = normalizeEnvironment(bareEnv());
+    const added = ensureDevToolchain(env, studioProbe);
+
+    expect(envValue(env, 'JAVA_HOME')).toBe('C:\\Program Files\\Android\\Android Studio\\jbr');
+    expect(pathEntries(env)[0]).toBe('C:\\Program Files\\Android\\Android Studio\\jbr\\bin');
+    expect(added).toEqual(['JAVA_HOME=C:\\Program Files\\Android\\Android Studio\\jbr']);
+    // The whole reason env.ts exists: one spelling of PATH, never two.
+    expect(pathKeys(env)).toEqual(['Path']);
+    // What the parent had is still reachable behind the addition.
+    expect(pathEntries(env)).toContain('C:\\Windows\\System32');
+  });
+
+  it('never overrides a JAVA_HOME the user already chose', () => {
+    const env = normalizeEnvironment({ ...bareEnv(), JAVA_HOME: 'C:\\jdk-21' });
+    expect(ensureDevToolchain(env, studioProbe)).toEqual([]);
+    expect(envValue(env, 'JAVA_HOME')).toBe('C:\\jdk-21');
+    expect(pathEntries(env)).toEqual(['C:\\Windows\\System32']);
+  });
+
+  it('never redirects a build whose java already resolves on PATH', () => {
+    // A project deliberately selecting its JDK through PATH must not be quietly moved to
+    // whichever JDK this machine happens to have installed somewhere else.
+    const probe: ToolchainProbe = {
+      isFile: (target) =>
+        target === 'C:\\chosen\\jdk\\bin\\java.exe' ||
+        target === 'C:\\Program Files\\Android\\Android Studio\\jbr\\bin\\java.exe',
+      directories: () => []
+    };
+    const env = normalizeEnvironment({ ...bareEnv(), Path: 'C:\\chosen\\jdk\\bin;C:\\Windows\\System32' });
+    expect(ensureDevToolchain(env, probe)).toEqual([]);
+    expect(envValue(env, 'JAVA_HOME')).toBeUndefined();
+  });
+
+  it('adds nothing at all when no toolchain is actually on disk', () => {
+    const env = normalizeEnvironment(bareEnv());
+    const empty: ToolchainProbe = { isFile: () => false, directories: () => [] };
+    expect(ensureDevToolchain(env, empty)).toEqual([]);
+    expect(envValue(env, 'JAVA_HOME')).toBeUndefined();
+    expect(envValue(env, 'GOROOT')).toBeUndefined();
+    expect(pathEntries(env)).toEqual(['C:\\Windows\\System32']);
+  });
+
+  it('descends one level into a versioned install root and prefers the later version', () => {
+    const probe: ToolchainProbe = {
+      isFile: (target) => target === 'C:\\Program Files\\Java\\jdk-21\\bin\\java.exe',
+      directories: (target) =>
+        target === 'C:\\Program Files\\Java'
+          ? ['C:\\Program Files\\Java\\jdk-11', 'C:\\Program Files\\Java\\jdk-21']
+          : []
+    };
+    const env = normalizeEnvironment(bareEnv());
+    ensureDevToolchain(env, probe);
+    expect(envValue(env, 'JAVA_HOME')).toBe('C:\\Program Files\\Java\\jdk-21');
+  });
+
+  it('compares version numbers as numbers, so 9 does not outrank 21', () => {
+    // A lexical sort puts `jdk-9` after `jdk-21` on the first character, and this code
+    // took the last name as the newest. On a machine holding both, every Gradle build
+    // would have been handed a JDK that current Gradle refuses to run on at all.
+    const both = ['C:\\Program Files\\Java\\jdk-21', 'C:\\Program Files\\Java\\jdk-9'];
+    const probe: ToolchainProbe = {
+      isFile: (target) => both.some((root) => target === `${root}\\bin\\java.exe`),
+      directories: (target) => (target === 'C:\\Program Files\\Java' ? both : [])
+    };
+    const env = normalizeEnvironment(bareEnv());
+    ensureDevToolchain(env, probe);
+    expect(envValue(env, 'JAVA_HOME')).toBe('C:\\Program Files\\Java\\jdk-21');
+  });
+
+  it('orders a patch version the same way', () => {
+    const all = [
+      'C:\\Program Files\\Java\\jdk-21.0.5',
+      'C:\\Program Files\\Java\\jdk-21.0.12',
+      'C:\\Program Files\\Java\\jdk-8'
+    ];
+    const probe: ToolchainProbe = {
+      isFile: (target) => all.some((root) => target === `${root}\\bin\\java.exe`),
+      directories: (target) => (target === 'C:\\Program Files\\Java' ? all : [])
+    };
+    const env = normalizeEnvironment(bareEnv());
+    ensureDevToolchain(env, probe);
+    expect(envValue(env, 'JAVA_HOME')).toBe('C:\\Program Files\\Java\\jdk-21.0.12');
+  });
+
+  it('still reaches a toolchain whose name carries no version at all', () => {
+    // `jbr`, `current`, `latest`: ranking must never make one unreachable.
+    const probe: ToolchainProbe = {
+      isFile: (target) => target === 'C:\\Program Files\\Android\\Android Studio\\jbr\\bin\\java.exe',
+      directories: (target) =>
+        target === 'C:\\Program Files\\Android\\Android Studio'
+          ? ['C:\\Program Files\\Android\\Android Studio\\jbr']
+          : []
+    };
+    const env = normalizeEnvironment(bareEnv());
+    ensureDevToolchain(env, probe);
+    expect(envValue(env, 'JAVA_HOME')).toBe('C:\\Program Files\\Android\\Android Studio\\jbr');
+  });
+
+  it('fills in GOROOT on the same terms', () => {
+    const probe: ToolchainProbe = {
+      isFile: (target) => target === 'C:\\Program Files\\Go\\bin\\go.exe',
+      directories: () => []
+    };
+    const env = normalizeEnvironment(bareEnv());
+    expect(ensureDevToolchain(env, probe)).toEqual(['GOROOT=C:\\Program Files\\Go']);
+    expect(envValue(env, 'GOROOT')).toBe('C:\\Program Files\\Go');
+    expect(pathEntries(env)[0]).toBe('C:\\Program Files\\Go\\bin');
+  });
+
+  it('is idempotent, so a long-lived process cannot grow its path without bound', () => {
+    const env = normalizeEnvironment(bareEnv());
+    ensureDevToolchain(env, studioProbe);
+    const afterFirst = envValue(env, 'PATH');
+    ensureDevToolchain(env, studioProbe);
+    expect(envValue(env, 'PATH')).toBe(afterFirst);
   });
 });

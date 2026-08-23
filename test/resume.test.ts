@@ -40,13 +40,13 @@ const {
   CONTINUATIONS_STATE,
   restoreContinuations
 } = await import('../src/main/session/continuation.js');
-const { makeTempDir, removeTempDir } = await import('./helpers.js');
+const { makeTempDir, removeTempDir, SAMPLE_BRIEF } = await import('./helpers.js');
 const { BRIDGE_PROTOCOL } = await import('../src/main/version.js');
 
 const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop';
 const CHAT_A = '6a805197-b090-83eb-bbd8-a32b482941da';
 const CHAT_B = '7b916208-c1a1-94fc-cce9-b43c593a52eb';
-const BRIEF = 'TASK — finish the bridge rewrite.\nNEXT — run the tests.';
+const BRIEF = SAMPLE_BRIEF;
 
 let dir: string;
 let base: string;

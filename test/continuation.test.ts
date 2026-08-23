@@ -42,18 +42,22 @@ const {
   abortContinuation,
   attachSummary,
   claimContinuation,
+  claimContinuationNow,
   commitContinuation,
   continuationForSession,
   openContinuation,
-  resetContinuationsForTests
+  resetContinuationsForTests,
+  restoreContinuations
 } = await import('../src/main/session/continuation.js');
+const { RESUME_CLAIM_WINDOW_MS, resumeOpeningChat } = await import('../src/main/session/resume-gate.js');
+const { briefShortfall } = await import('../src/main/session/handoff.js');
 const { createSession, getSession, initSessionStore, resetSessionStoreForTests, sessionsRoot } = await import(
   '../src/main/session/store.js'
 );
 const store = await import('../src/main/session/store.js');
 const { resetRecorderForTests, sessionForConversation } = await import('../src/main/session/recorder.js');
 const { resetWorkspaces, setWorkspaceFor, workspaceEntries } = await import('../src/main/workspace.js');
-const { makeTempDir, removeTempDir } = await import('./helpers.js');
+const { makeTempDir, removeTempDir, SAMPLE_BRIEF } = await import('./helpers.js');
 
 let dir: string;
 
@@ -102,7 +106,7 @@ afterEach(() => {
 async function readyContinuation(): Promise<{ sessionId: string; token: string }> {
   const summary = await createSession({ title: 'work', conversationId: CHAT_A });
   const opened = openContinuation(summary.id, CHAT_A);
-  await attachSummary(opened.token, 'what was happening');
+  await attachSummary(opened.token, SAMPLE_BRIEF);
   return { sessionId: summary.id, token: opened.token };
 }
 
@@ -111,10 +115,10 @@ describe('capturing the brief', () => {
     const summary = await createSession({ title: 'work', conversationId: CHAT_A });
     const opened = openContinuation(summary.id, CHAT_A);
 
-    const first = await attachSummary(opened.token, 'the brief');
+    const first = await attachSummary(opened.token, SAMPLE_BRIEF);
     // The connector loses tool results, so the page reports the same finished generation
     // again. That retry must read as the success it is, not as a failure worth another flow.
-    const again = await attachSummary(opened.token, 'the brief');
+    const again = await attachSummary(opened.token, SAMPLE_BRIEF);
 
     expect(first).not.toBeNull();
     expect(again?.id).toBe(first?.id);
@@ -128,8 +132,8 @@ describe('capturing the brief', () => {
     // Both see `awaiting-summary` before either write lands. Without a lock taken before the
     // first await, both would write, and the second brief would silently win.
     const [first, second] = await Promise.all([
-      attachSummary(opened.token, 'the brief'),
-      attachSummary(opened.token, 'the brief')
+      attachSummary(opened.token, SAMPLE_BRIEF),
+      attachSummary(opened.token, SAMPLE_BRIEF)
     ]);
 
     expect(first?.id).toBe(second?.id);
@@ -144,22 +148,24 @@ describe('capturing the brief', () => {
     // The duplicate joins the attempt already in flight. It must not receive a rejected
     // promise for a step that simply has to be done again.
     const both = await Promise.all([
-      attachSummary(opened.token, 'the brief'),
-      attachSummary(opened.token, 'the brief')
+      attachSummary(opened.token, SAMPLE_BRIEF),
+      attachSummary(opened.token, SAMPLE_BRIEF)
     ]);
     expect(both).toEqual([null, null]);
 
     spy.mockRestore();
-    expect(await attachSummary(opened.token, 'the brief')).not.toBeNull();
+    expect(await attachSummary(opened.token, SAMPLE_BRIEF)).not.toBeNull();
     expect(await handoffCount(summary.id)).toBe(1);
   });
 
   it('keeps the first brief when a re-observation differs, and still reports success', async () => {
     const summary = await createSession({ title: 'work', conversationId: CHAT_A });
     const opened = openContinuation(summary.id, CHAT_A);
-    const first = await attachSummary(opened.token, 'the brief');
+    const first = await attachSummary(opened.token, SAMPLE_BRIEF);
 
-    const again = await attachSummary(opened.token, 'the brief, re-rendered slightly differently');
+    const again = await attachSummary(opened.token, `${SAMPLE_BRIEF}
+
+(re-rendered slightly differently)`);
 
     expect(again?.id).toBe(first?.id);
     expect(again?.text).toBe(first?.text);
@@ -181,9 +187,9 @@ describe('claiming', () => {
   it('serves one claimant and refuses a second', async () => {
     const { token } = await readyContinuation();
 
-    expect(claimContinuation(token, 'tab-1')?.summary).toContain('what was happening');
+    expect(claimContinuation(token, 'tab-1')?.summary).toContain(SAMPLE_BRIEF);
     expect(claimContinuation(token, 'tab-2')).toBeNull();
-    expect(claimContinuation(token, 'tab-1')?.summary).toContain('what was happening');
+    expect(claimContinuation(token, 'tab-1')?.summary).toContain(SAMPLE_BRIEF);
   });
 
   it('does not move the state backwards while a commit is in flight', async () => {
@@ -207,7 +213,7 @@ describe('claiming', () => {
 
     // The retrying claimant wants its brief; what it must not get is the state put back to
     // `claimed`, which was the one way a second commit could enter behind the first.
-    expect(claimContinuation(token, 'tab-1')?.summary).toContain('what was happening');
+    expect(claimContinuation(token, 'tab-1')?.summary).toContain(SAMPLE_BRIEF);
     expect(continuationForSession(sessionId)?.state).toBe('committing');
     const second = await commitContinuation(token, 'chat-c');
     expect(second).toBe(false);
@@ -335,7 +341,7 @@ describe('the swarm handover', () => {
     const summary = await createSession({ title: 'work', conversationId: CHAT_A });
     startSwarm(CHAT_A);
     const opened = openContinuation(summary.id, CHAT_A);
-    await attachSummary(opened.token, 'what was happening');
+    await attachSummary(opened.token, SAMPLE_BRIEF);
     claimContinuation(opened.token, 'tab-1');
 
     expect(await commitContinuation(opened.token, CHAT_B)).toBe(true);
@@ -347,7 +353,7 @@ describe('the swarm handover', () => {
     const summary = await createSession({ title: 'work', conversationId: CHAT_A });
     startSwarm(CHAT_A);
     const opened = openContinuation(summary.id, CHAT_A);
-    await attachSummary(opened.token, 'what was happening');
+    await attachSummary(opened.token, SAMPLE_BRIEF);
     claimContinuation(opened.token, 'tab-1');
 
     let release = (): void => undefined;
@@ -381,7 +387,7 @@ describe('the swarm handover', () => {
     const summary = await createSession({ title: 'work', conversationId: CHAT_A });
     startSwarm(CHAT_A);
     const opened = openContinuation(summary.id, CHAT_A);
-    await attachSummary(opened.token, 'what was happening');
+    await attachSummary(opened.token, SAMPLE_BRIEF);
     claimContinuation(opened.token, 'tab-1');
 
     // The handover is gone while the continuation itself is still perfectly live — so the
@@ -446,5 +452,169 @@ describe('the swarm handover', () => {
 
     expect(commitPrimeTransfer('someone-else', CHAT_B)).toBe(false);
     expect(primeConversation()).toBe(CHAT_A);
+  });
+});
+
+
+/**
+ * The brief a session is worth moving for.
+ *
+ * On 2026-08-23 a compaction turn was declared finished 28 characters in, and `TASK\nContinue
+ * implementing ` — cut off at an opening backtick — was stored as the whole handoff for a
+ * session holding 455 events and 318,422 tokens. It was typed into a replacement chat that
+ * had no way to tell it from a complete document, because no receiver has: a brief is prose,
+ * and a truncated one is still prose.
+ *
+ * So the check has to happen before it is stored, and it cannot be a check on meaning. Length
+ * against the size of what is being handed over is the one property that separates the two
+ * outcomes here — and the direction of the failure is what makes a crude test acceptable. A
+ * refused brief costs a second press; an accepted truncated one costs the session.
+ */
+describe('a brief that cannot be the whole handoff', () => {
+  it('refuses nothing at all', () => {
+    expect(briefShortfall('', 50_000)).toMatch(/nothing/i);
+    expect(briefShortfall('   \n  ', 50_000)).toMatch(/nothing/i);
+  });
+
+  it('refuses the twenty-eight characters that started this', () => {
+    const cut = 'TASK\nContinue implementing `';
+    const refusal = briefShortfall(cut, 318_422);
+    expect(refusal).toBeTruthy();
+    expect(refusal).toContain('28 characters');
+  });
+
+  it('refuses a plausible-looking brief that is far too small for the session it carries', () => {
+    // Long enough to read as a document, and nowhere near enough to be one. This is the
+    // shape a turn cut off mid-way actually produces.
+    const partial = `TASK — ${'continue the rewrite. '.repeat(12)}`;
+    expect(partial.length).toBeGreaterThan(200);
+    expect(briefShortfall(partial, 300_000)).toMatch(/cannot be the whole handoff/i);
+    // The same text is a fine brief for a session that has barely started.
+    expect(briefShortfall(partial, 900)).toBeNull();
+  });
+
+  it('accepts a real one', () => {
+    expect(briefShortfall(SAMPLE_BRIEF, 318_422)).toBeNull();
+  });
+});
+
+/**
+ * The 302 milliseconds that lost a session.
+ *
+ * When a resume opens chat B, two things race to react to B appearing: the recorder, which
+ * invents a session for any conversation it has not seen, and the commit, which moves the
+ * *existing* session onto B. The recorder won, the commit found its own destination already
+ * owned — "the replacement chat already belongs to another local session" — and refused to
+ * rebind. The prime role moved to the new chat anyway; the session did not follow it.
+ *
+ * The gate is one boolean the recorder can ask before inventing anything. These are about
+ * when it is armed and, more importantly, when it stops being: an armed gate that nothing
+ * clears would make every unrelated new chat wait.
+ */
+describe('the window in which a replacement chat is expected', () => {
+  it('is armed by a claim and cleared by the commit', async () => {
+    expect(resumeOpeningChat()).toBe(false);
+    const { sessionId, token } = await readyContinuation();
+    claimContinuation(token, CHAT_B);
+    expect(resumeOpeningChat()).toBe(true);
+
+    await commitContinuation(token, CHAT_B);
+    expect(await attachedChat(sessionId)).toBe(CHAT_B);
+    expect(resumeOpeningChat()).toBe(false);
+  });
+
+  it('is cleared by an abort as well, so a failed move does not hold new chats up', async () => {
+    const { token } = await readyContinuation();
+    claimContinuation(token, CHAT_B);
+    expect(resumeOpeningChat()).toBe(true);
+    abortContinuation(token, 'gave up');
+    expect(resumeOpeningChat()).toBe(false);
+  });
+
+  it('expires on its own when the replacement chat never appears', async () => {
+    const { token } = await readyContinuation();
+    claimContinuation(token, CHAT_B);
+    expect(resumeOpeningChat()).toBe(true);
+    // A crash between the claim and the commit, or a browser that never opened the tab.
+    // Failing to wait costs a visible stub session; waiting forever would stop the app
+    // recording new chats at all, so this expires in the safe direction.
+    expect(resumeOpeningChat(Date.now() + RESUME_CLAIM_WINDOW_MS + 1)).toBe(false);
+    expect(resumeOpeningChat()).toBe(false);
+  });
+
+  it('is not armed by a durable claim whose write failed', async () => {
+    const { token } = await readyContinuation();
+    const durable = await import('../src/main/durable.js');
+    vi.spyOn(durable, 'writeDurableNow').mockRejectedValueOnce(new Error('disk full'));
+    await expect(claimContinuationNow(token, CHAT_B)).rejects.toThrow(/disk full/);
+    // Nothing was claimed, so nothing may be waited for. Arming before the write is what
+    // would have made every unrelated new chat pay the settle window for a claim that does
+    // not exist.
+    expect(resumeOpeningChat()).toBe(false);
+  });
+
+  it('is re-armed for a continuation recovered still holding its claim', async () => {
+    const { sessionId, token } = await readyContinuation();
+    claimContinuation(token, CHAT_B);
+    const snapshot = {
+      version: 1 as const,
+      savedAt: Date.now(),
+      entries: [
+        {
+          token,
+          sessionId,
+          from: CHAT_A,
+          to: null,
+          openedAt: Date.now(),
+          state: 'claimed' as const,
+          summary: SAMPLE_BRIEF,
+          handoffId: continuationForSession(sessionId)?.handoffId ?? null,
+          claimedBy: CHAT_B,
+          armed: true,
+          error: null
+        }
+      ]
+    };
+
+    // The restart. The claim that armed the gate happened in a process that is gone, and
+    // the replacement chat may be sitting in a tab about to report in — which is exactly
+    // the restart most likely to hit the collision this exists to prevent.
+    resetContinuationsForTests();
+    expect(resumeOpeningChat()).toBe(false);
+    await restoreContinuations(snapshot);
+    expect(resumeOpeningChat()).toBe(true);
+  });
+
+  it('is not re-armed for a continuation that was already finished', async () => {
+    const { sessionId, token } = await readyContinuation();
+    resetContinuationsForTests();
+    await restoreContinuations({
+      version: 1 as const,
+      savedAt: Date.now(),
+      entries: [
+        {
+          token,
+          sessionId,
+          from: CHAT_A,
+          to: CHAT_B,
+          openedAt: Date.now(),
+          state: 'aborted' as const,
+          summary: SAMPLE_BRIEF,
+          handoffId: null,
+          claimedBy: CHAT_B,
+          armed: true,
+          error: 'gave up'
+        }
+      ]
+    });
+    expect(resumeOpeningChat()).toBe(false);
+  });
+
+  it('is cleared by the test reset, so one case cannot slow the next one down', async () => {
+    const { token } = await readyContinuation();
+    claimContinuation(token, CHAT_B);
+    expect(resumeOpeningChat()).toBe(true);
+    resetContinuationsForTests();
+    expect(resumeOpeningChat()).toBe(false);
   });
 });

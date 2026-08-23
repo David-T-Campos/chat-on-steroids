@@ -15,6 +15,7 @@
  */
 
 import { rawPromises as fs } from '../rawfs.js';
+import nodeFs from 'node:fs';
 import nodePath from 'node:path';
 import { z } from 'zod';
 import { DEFAULT_READ_BYTES, MAX_READ_BYTES, formatBytes } from '../fsops.js';
@@ -82,6 +83,14 @@ import {
   WRITE_STDIN_YIELD_TIME_DESCRIPTION
 } from '../codex/tool-specs.js';
 import { lineDelta } from '../diffstat.js';
+import {
+  execRecoveryHints,
+  nonZeroExitIsBenign,
+  normalizeShellCommand,
+  withExecNotes
+} from '../exec-hints.js';
+import { normalizeEnvironment } from '../env.js';
+import { ensureDevToolchain } from '../toolchain.js';
 import {
   agentForCaller,
   currentRunId,
@@ -180,6 +189,27 @@ const viewImageOutputSchema = z
   })
   .strict();
 
+/** Whether the one-time note about a discovered toolchain has already been logged. */
+let toolchainLogged = false;
+
+/**
+ * The environment `exec_command` hands its child.
+ *
+ * Built through `normalizeEnvironment` rather than by spreading `process.env`, because
+ * `ensureDevToolchain` has to edit PATH and env.ts exists precisely to stop a second
+ * spelling of it appearing beside the first. `applyUnifiedExecEnv` stays last so the Codex
+ * pager/colour contract is still the final word, exactly as it was before.
+ */
+function execChildEnvironment(): NodeJS.ProcessEnv {
+  const env = normalizeEnvironment(process.env);
+  const added = ensureDevToolchain(env);
+  if (added.length > 0 && !toolchainLogged) {
+    toolchainLogged = true;
+    logInfo(`exec_command: filled in unset toolchain variables (${added.join(', ')})`);
+  }
+  return applyUnifiedExecEnv(env);
+}
+
 export function registerCoreTools(reg: SurfaceRegistrar): void {
   const { ctx, caps, exposedCaps } = reg;
 
@@ -198,7 +228,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           'a PNG/JPEG/GIF/WebP comes back as an image, and anything else returns its metadata and why it was not decoded. ' +
           'Paths may contain * ? and ** and are expanded here. Every result starts with a header giving size, timestamps and line count. ' +
           `The line-number prefix is display metadata, not file content — strip it before quoting text into apply_patch. ` +
-          `Line ranges apply only when you ask for exactly one path. Output is capped at ${formatBytes(MAX_READ_BYTES)} for the whole call.`,
+          `A line range applies to every file the call resolves to. Output is capped at ${formatBytes(MAX_READ_BYTES)} for the whole call.`,
         inputSchema: z.object({
           paths: z
             .array(pathArg)
@@ -207,8 +237,12 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             .describe(
               'Paths inside approved roots. Use virtual paths such as /project/src/main.ts or paste native Windows paths such as C:\\work\\project\\src\\main.ts; native paths are normalized to the same virtual sandbox. Globs are supported in either spelling.'
             ),
-          start_line: lineNumberArg.optional().describe('First line, 1-based. Only when the call reads exactly one file; otherwise it is refused.'),
-          end_line: lineNumberArg.optional().describe('Last line, inclusive. Only when the call reads exactly one file; otherwise it is refused.'),
+          start_line: lineNumberArg
+            .optional()
+            .describe('First line, 1-based. Applied to every file the call reads, so prefer one path when the range is file-specific.'),
+          end_line: lineNumberArg
+            .optional()
+            .describe('Last line, inclusive. Applied to every file the call reads, so prefer one path when the range is file-specific.'),
           max_bytes: z
             .number()
             .int()
@@ -246,16 +280,23 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             if (expanded.truncated) notes.push(`${requested}: more than ${MAX_GLOB_MATCHES} matches, narrow the pattern`);
           }
 
-          const single = targets.length === 1;
+          const ranged = start_line !== undefined || end_line !== undefined;
           // A line range asked for once and quietly dropped is worse than a refusal: the
           // reply looks like an answer, every file arrives from line 1 until the byte cap,
-          // and nothing says the range went away. Globs are checked after expansion, since
-          // one pattern is what usually turns a single-path call into a multi-path one.
-          if (targets.length > 1 && (start_line !== undefined || end_line !== undefined)) {
-            return fail(
-              `INVALID_ARGUMENT: start_line/end_line apply to one file, but this call resolves to ${targets.length} ` +
-                `(${targets.slice(0, 4).join(', ')}${targets.length > 4 ? ', …' : ''}). ` +
-                'Read the one file you want a range from, or drop the range.'
+          // and nothing says the range went away. That objection is about *silence*, not
+          // about the range itself — so the range is now honoured for every file and said
+          // out loud, which was the only outcome that discarded neither the caller's intent
+          // nor the truth. Each section header already states `lines X-Y of Z`, so a file
+          // shorter than the range cannot be mistaken for a complete read.
+          //
+          // Refusing instead was the single largest source of rejected calls in the recorded
+          // sessions, and every one of them was a caller that had already said what it
+          // wanted. Globs are still resolved first, since one pattern is what usually turns
+          // a single-path call into a multi-path one.
+          if (targets.length > 1 && ranged) {
+            notes.push(
+              `(start_line/end_line applied to each of the ${targets.length} files this call resolved to; ` +
+                'every header states the lines actually returned)'
             );
           }
           const sections: string[] = [];
@@ -273,8 +314,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
                 roots: ctx.roots,
                 canRead: caps.read,
                 canBrowse: caps.browse,
-                startLine: single ? start_line : undefined,
-                endLine: single ? end_line : undefined,
+                startLine: start_line,
+                endLine: end_line,
                 maxBytes: Math.min(max_bytes ?? DEFAULT_READ_BYTES, remaining)
               });
               remaining -= section.bytes;
@@ -522,7 +563,15 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
         reg.guarded('command', 'exec_command', async () => {
           const dir = await resolveCwd(ctx, input.workdir);
           const shell = input.shell === undefined ? defaultUserShell() : getShellByModelProvidedPath(input.shell);
-          const command = deriveExecArgs(shell, input.cmd, input.login ?? true);
+          // Does only what the shell itself would have done — today, expanding a bare filename
+          // glob PowerShell hands to a native program uninterpreted. Anything it does not
+          // understand reaches the shell exactly as the model wrote it. The listing is read
+          // lazily and only from the resolved workdir, so a command with no glob in it never
+          // touches the disk here.
+          const normalized = normalizeShellCommand(input.cmd, shell.shellType, () =>
+            nodeFs.readdirSync(dir.real)
+          );
+          const command = deriveExecArgs(shell, normalized.cmd, input.login ?? true);
           const processId = unifiedExecManager.allocateProcessId();
           try {
             // Current Codex intercepts an explicit `apply_patch` shell invocation before spawning
@@ -565,14 +614,14 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             const output = await unifiedExecManager.execCommand({
               command,
               shellType: shell.shellType,
-              hookCommand: input.cmd,
+              hookCommand: normalized.cmd,
               processId,
               yieldTimeMs: input.yield_time_ms ?? DEFAULT_EXEC_YIELD_TIME_MS,
               maxOutputTokens: input.max_output_tokens,
               truncationPolicy: DEFAULT_TRUNCATION_POLICY,
               cwd: dir.real,
               displayCwd: dir.virtual,
-              env: applyUnifiedExecEnv(process.env),
+              env: execChildEnvironment(),
               tty: input.tty ?? DEFAULT_TTY
             });
             // Which chat may later write to this session id. Codex gets this for free from a
@@ -590,17 +639,25 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               }
               noteExecOwner(output.processId, owner);
             }
+            const responseText = execCommandResponseText(output);
+            // A search that found nothing exits 1 and has not failed. Recording it as an
+            // error made a session's error count meaningless; see exec-hints.ts for why this
+            // cannot launder a real failure. `benign` only ever *withholds* the error mark —
+            // it never turns a genuine non-zero exit into a success.
+            const benign = nonZeroExitIsBenign(normalized.cmd, output.exitCode, responseText);
             noteExec({
               ...(output.processId === null ? {} : { id: String(output.processId) }),
               running: output.processId !== null,
               exitCode: output.exitCode,
               timedOut: false,
-              durationMs: output.wallTimeMs
+              durationMs: output.wallTimeMs,
+              benignExit: benign
             });
             noteDetail(input.cmd.replace(/\s+/g, ' ').slice(0, 120));
             logInfo(`tool exec_command ${shell.shellType} -> ${output.processId ?? `exit ${output.exitCode ?? 'unknown'}`}`);
+            const notes = [...normalized.notes, ...execRecoveryHints(normalized.cmd, responseText)];
             return {
-              content: [{ type: 'text' as const, text: execCommandResponseText(output) }],
+              content: [{ type: 'text' as const, text: withExecNotes(responseText, notes) }],
               structuredContent: execCommandStructuredOutput(output)
             };
           } catch (error) {

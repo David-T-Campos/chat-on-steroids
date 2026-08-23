@@ -9,6 +9,46 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [1.9.6] — 2026-08-23
+
+### Fixed
+- **A compaction turn is no longer declared finished while it is still working.** The end of a
+  turn was decided by one signal — the stop control staying gone for four seconds — and a long
+  agentic turn makes that control flicker between phases. On 2026-08-23 that closed a compaction
+  turn 28 characters into its brief, stored `TASK\nContinue implementing ` as the whole handoff
+  for a session holding 455 events and 318,422 tokens, and opened the replacement chat with it
+  while the original went on making tool calls for another seven minutes. The brief is now held
+  until four things agree and keep agreeing: the stop control is gone, the answer has stopped
+  growing, the turn's tool rail has stopped moving, and the app reports no local call still
+  running. An app that cannot be asked counts as busy rather than as idle.
+- **A brief too short to have carried the session is refused instead of stored.** Nothing
+  downstream can tell a truncated handoff from a complete one, so the check happens before it is
+  written. A refused compaction leaves the session exactly where it was and says why.
+- **A resume no longer races the recorder for its own replacement chat.** The recorder invents a
+  session for any conversation it has not seen; the commit moves the existing session onto that
+  same chat. The recorder won by 302 ms, the commit found its destination already owned and
+  refused to rebind, and the session stayed behind while the swarm's prime role moved on without
+  it. New chats now wait, briefly and boundedly, while a replacement chat is expected — including
+  after a restart that recovered a continuation still holding its claim.
+- **`rg pattern *_test.go` works on PowerShell without silently widening.** PowerShell does not
+  expand globs for native programs, so the pattern reached ripgrep literally and the call failed.
+  The glob is now expanded against the working directory the way the shell would have, rather
+  than rewritten to `-g`, which is a recursive filter that would also have matched
+  `sub/nested_test.go`. Only the first statement of a command line is touched, because anything
+  after it may have changed the directory or the files in it.
+- **A search that found nothing is no longer recorded as a failed tool call.** `rg`, `grep` and
+  `findstr` spend exit 1 on "no matches" and reserve other codes for real errors. The exemption
+  applies only when the program that set `$LASTEXITCODE` — the rightmost native stage of the
+  pipeline, not its generator — is one of those, and only when it printed no error of its own.
+- **`read` accepts several paths and a line range in one call**, and says outright when a file
+  has no lines in that range, so a short file can never read as a complete one.
+- **A child process inherits the environment it was given**, and `JAVA_HOME` / `GOROOT` are
+  filled in from an installed toolchain when — and only when — the tool would otherwise be
+  unreachable. Versioned install directories are now compared as version numbers, so `jdk-21`
+  outranks `jdk-9`.
+- **git run outside a repository says so**, and names how to find the root, instead of returning
+  a bare failure.
+
 ## [1.9.5] — 2026-08-23
 
 ### Added
