@@ -313,15 +313,18 @@ describe.runIf(IS_WINDOWS)('a real console', () => {
   });
 
   it('gives the program a terminal, merges its streams, and resizes on request', async () => {
-    // A piped PowerShell has no window to measure. Reporting exactly the size that was
-    // asked for is the proof that a real console was attached rather than a pipe.
-    const script = [
-      '[Console]::Error.WriteLine("stderr-line")',
-      'Write-Output ("width=" + $Host.UI.RawUI.WindowSize.Width)'
-    ].join('; ');
+    // A piped process has no window to measure. Reporting exactly the size that was asked
+    // for is the proof that a real console was attached rather than a pipe, and `mode con`
+    // asks the console itself — down a pipe there is nothing to ask.
+    //
+    // Deliberately `cmd.exe` rather than PowerShell: the subject here is ConPTY, not any
+    // one shell, and a cold `powershell.exe` on a hosted Windows runner took longer to
+    // produce its first byte than this entire wait, handing back an empty buffer and
+    // failing a release for a reason that had nothing to do with the console. The other
+    // console tests in this file passed in about a second either side of it.
     const started = await startManagedProcess(
-      'powershell.exe',
-      ['-NoLogo', '-NoProfile', '-NoExit', '-Command', script],
+      'cmd.exe',
+      ['/d', '/q', '/k', 'echo stderr-line 1>&2 & mode con & echo size-reported'],
       cwd,
       undefined,
       { tty: true, cols: 100, rows: 30 }
@@ -331,26 +334,39 @@ describe.runIf(IS_WINDOWS)('a real console', () => {
     expect(started.cols).toBe(100);
     expect(started.pid).toBeGreaterThan(0);
 
+    // `mode con` translates its own labels, so every assertion below is on the number the
+    // console reported and never on the English word in front of it — and it is read out
+    // of the stretch of output that one `mode con` produced, so nothing else on the screen,
+    // the prompt's own path included, can supply a digit that passes for an answer.
+    const between = (text: string, from: string, to: string): string => {
+      const start = text.indexOf(from);
+      const end = start === -1 ? -1 : text.indexOf(to, start + from.length);
+      return end === -1 ? '' : text.slice(start + from.length, end);
+    };
+
     // A console has one screen, so what the program wrote to stderr arrives on the same
     // stream, in the place it happened. There is no second stream to read.
     //
-    // Waited on the *second* line, not the first: both are written back to back, and
-    // returning as soon as `stderr-line` appeared raced the console into handing back a
-    // buffer that legitimately did not have the width in it yet.
-    const seen = await waitForOutput(started.id, 'width=', 'stdout', 8000);
+    // Waited on the marker after the size, not on the stderr line before it: they are
+    // written back to back, and returning on the first raced the console into handing back
+    // a buffer that legitimately did not have the size in it yet.
+    const seen = await waitForOutput(started.id, 'size-reported', 'stdout', 15_000);
     expect(seen.stderr).toBe('');
     expect(seen.stdout).toContain('stderr-line');
-    expect(seen.stdout).toContain('width=100');
+    expect(between(seen.stdout, 'stderr-line', 'size-reported')).toMatch(/\b100\b/);
     // The escape sequences a console emits are stripped before the text is handed back.
     expect(seen.stdout).not.toContain('\u001b');
 
     const resized = resizeManagedProcess(started.id, 133, 41);
     expect(resized.cols).toBe(133);
     expect(resized.rows).toBe(41);
-    await writeManagedProcess(started.id, '$Host.UI.RawUI.WindowSize.Width', true);
-    // The program itself reports the new size, which is the only proof the resize reached it.
-    const after = await waitForOutput(started.id, '133', 'stdout', 8000);
-    expect(after.stdout).toContain('133');
+    // Typed without a marker of its own: the terminal echoes what is typed, so a marker
+    // would arrive before the command it was meant to follow. `mode con` carries no digits,
+    // which leaves the new width the first one that can appear after this point.
+    await writeManagedProcess(started.id, 'mode con', true);
+    // The console itself reports the new size, which is the only proof the resize reached it.
+    const after = await waitForOutput(started.id, '133', 'stdout', 15_000);
+    expect(after.stdout.slice(after.stdout.indexOf('size-reported'))).toMatch(/\b133\b/);
 
     const stopped = await stopManagedProcess(started.id, 20);
     expect(stopped.running).toBe(false);

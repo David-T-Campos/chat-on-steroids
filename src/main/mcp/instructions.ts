@@ -54,6 +54,10 @@ function coreInstructions(ctx: ToolContext): string {
     // The gap that produced the most repeated shell failures: a POSIX shell expands globs
     // before the program runs and PowerShell does not, so the program receives the asterisk.
     'PowerShell does not expand * or ? for native programs. Pass ripgrep filename patterns as -g \'*.go\', and expand other globs with Get-ChildItem before use.',
+    // Two bash habits that Windows PowerShell answers with a failure the output does not
+    // explain. Neither can be rewritten safely — stripping the redirect changes what the
+    // command returns, and `;` is not what `&&` means — so they are said once, up front.
+    'In Windows PowerShell do not append 2>&1 to a native program: its stderr is already captured, and redirecting it leaves $? false even when the program exited 0. PowerShell 5.1 also has no && or ||: write A; if ($?) { B } for A && B, and A; if (-not $?) { B } for A || B.',
     'Never send read’s line-number prefixes to apply_patch; they are display metadata, not file content.',
     'apply_patch is the only way to change files: it adds, updates, moves and deletes, and it is atomic across files.',
     'exec_command runs git, npm, builds, tests and anything else; a long-running one gives you a session_id to continue with write_stdin.',

@@ -34,12 +34,6 @@ it('drains an accepted MCP mutation before closing its response socket', async (
     readOnly: false,
     capabilities: { ...cfg.capabilities, command: true }
   });
-  await fs.writeFile(
-    path.join(dir, 'slow.cjs'),
-    "const fs=require('node:fs'); fs.writeFileSync('started.txt','started'); setTimeout(()=>fs.writeFileSync('after-stop.txt','after'),500); setTimeout(()=>{},600);\n",
-    'utf8'
-  );
-
   endpoint = await startMcpServer(() => ({
     roots: [{ name: 'probe', path: dir }],
     caps: { ...cfg.capabilities, command: true },
@@ -51,7 +45,15 @@ it('drains an accepted MCP mutation before closing its response socket', async (
     jsonrpc: '2.0',
     id: 1,
     method: 'tools/call',
-    params: { name: 'exec_command', arguments: { cmd: 'node slow.cjs', workdir: dir, yield_time_ms: 5_000 } }
+    params: {
+      name: 'exec_command',
+      arguments: {
+        cmd: "Set-Content -LiteralPath 'started.txt' -Value 'started' -NoNewline; Start-Sleep -Milliseconds 500; Set-Content -LiteralPath 'after-stop.txt' -Value 'after' -NoNewline",
+        workdir: '/probe',
+        shell: path.join(process.env.SystemRoot ?? 'C:\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        yield_time_ms: 5_000
+      }
+    }
   };
   const request = fetch(endpoint.url, {
     method: 'POST',
@@ -59,17 +61,25 @@ it('drains an accepted MCP mutation before closing its response socket', async (
     body: JSON.stringify(body)
   }).then(async (response) => ({ ok: true, status: response.status, text: await response.text() }));
 
-  // Wait against a deadline, not a fixed attempt count. This only synchronises the drain
-  // assertions below — but a cold `node` spawn on a Windows CI runner takes seconds, far
-  // longer than it ever does locally, and the old 100 x 20ms budget of two seconds expired
-  // before the child had written the file. The test's own 30s timeout is the real bound.
+  // Synchronise on a side effect from the accepted command before asking the server to stop.
+  // Keep the helper inside the already-running PowerShell process: spawning a second `node`
+  // process made this shutdown test depend on hosted-runner process startup rather than drain
+  // semantics, and on a Windows CI runner that cold spawn outran the whole 15s budget below.
   const startedAt = Date.now();
   while (Date.now() - startedAt < 15_000) {
     try {
       await fs.access(path.join(dir, 'started.txt'));
       break;
     } catch {
-      await sleep(20);
+      // A request that finishes before the file appears has failed for a reason the ENOENT
+      // below would hide; say what the server actually answered instead of timing out on it.
+      const early = await Promise.race([
+        request.then((result) => ({ done: true as const, result })),
+        sleep(20).then(() => ({ done: false as const }))
+      ]);
+      if (early.done) {
+        throw new Error(`MCP request finished before command start: HTTP ${early.result.status} ${early.result.text}`);
+      }
     }
   }
   await expect(fs.readFile(path.join(dir, 'started.txt'), 'utf8')).resolves.toContain('started');

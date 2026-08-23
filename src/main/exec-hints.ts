@@ -23,12 +23,18 @@
  *      nobody asked for is the one outcome worse than the error, because nothing downstream
  *      can tell that it happened.
  *
- *      For the same reason it only ever touches the *first* statement of a command line. A
- *      glob is expanded here, before anything runs, and the shell would have expanded it at
- *      the moment that statement was reached — the same answer only while nothing has run in
- *      between. `cd sub; rg foo *.ts` would be answered from the directory rg is not going to
- *      run in, and `npm run build; rg foo *.js` from before the files existed. Anything after
+ *      For the same reason a glob is only ever expanded in the *first* statement of a command
+ *      line. It is expanded here, before anything runs, and the shell would have expanded it
+ *      at the moment that statement was reached — the same answer only while nothing has run
+ *      in between. `cd sub; rg foo *.ts` would be answered from the directory rg is not going
+ *      to run in, and `npm run build; rg foo *.js` from before the files existed. A glob after
  *      the first statement is left alone and gets the hint.
+ *
+ *      The same function also expands bash brace groups, `src/{main,test}/x`, which PowerShell
+ *      has no syntax for and hands to the program as one literal name. That rewrite is textual
+ *      and asks the filesystem nothing, so it carries none of the debt above and applies to
+ *      every statement. It is kept deliberately narrow, because `{ … }` is also PowerShell's
+ *      script-block syntax and rewriting one of those would destroy the command.
  *
  *   3. `execRecoveryHints` — for the failures that cannot be rewritten safely, say what to
  *      do next in the same result rather than leaving the model to guess.
@@ -190,14 +196,46 @@ const CMDLET_ALIASES = new Set([
   'gci', 'gi', 'ls', 'dir', 'cat', 'echo', 'write', 'sls', 'ogv', '%', '?'
 ]);
 
+/**
+ * Cmdlets recognised by name, because nothing about a token's *shape* can prove one.
+ *
+ * `Verb-Noun` was the obvious test and it is not sound in either half. `docker-compose` and
+ * `tunnel-client` have the shape and are programs; narrowing to PowerShell's approved verb
+ * list does not save it either, because `test-runner`, `build-tool` and `get-version` are
+ * equally plausible executables built from approved verbs. Since the shape cannot decide,
+ * only an exact name may, and everything unrecognised is treated as native.
+ *
+ * That is the safe direction, and the asymmetry is the whole point: a real cmdlet missing
+ * from this list costs one benign-exit exemption, while a program mistaken for a cmdlet is
+ * skipped, hands the exit code back to the generator, and lets a generator on the no-match
+ * list launder that program's genuine failure into "the search found nothing".
+ *
+ * The list covers the object-processing cmdlets that actually appear as pipeline stages —
+ * every hyphenated stage head in the recorded corpus is here — plus the common neighbours.
+ */
+const KNOWN_CMDLETS = new Set([
+  'add-content', 'add-member', 'clear-content', 'compare-object', 'convertfrom-csv',
+  'convertfrom-json', 'convertfrom-stringdata', 'convertto-csv', 'convertto-html',
+  'convertto-json', 'copy-item', 'export-clixml', 'export-csv', 'format-custom',
+  'format-list', 'format-table', 'format-wide', 'get-childitem', 'get-command',
+  'get-content', 'get-date', 'get-filehash', 'get-item', 'get-itemproperty',
+  'get-location', 'get-member', 'get-process', 'get-random', 'get-unique', 'group-object',
+  'import-csv', 'join-path', 'measure-object', 'move-item', 'new-item', 'new-object',
+  'out-file', 'out-gridview', 'out-host', 'out-null', 'out-string', 'remove-item',
+  'rename-item', 'resolve-path', 'select-object', 'select-string', 'select-xml',
+  'set-content', 'set-location', 'sort-object', 'split-path', 'tee-object', 'test-path',
+  'where-object', 'write-error', 'write-host', 'write-output', 'write-warning',
+  'foreach-object'
+]);
+
 /** Whether a pipeline stage is PowerShell's own, and so cannot have set the exit code. */
 function looksLikeCmdlet(token: Token | undefined): boolean {
   if (!token) return false;
   // A path or an executable extension names a program, whatever the rest of it looks like.
   if (/[\\/]/.test(token.value)) return false;
   if (/\.(exe|cmd|bat|com|ps1)$/i.test(token.value)) return false;
-  if (CMDLET_ALIASES.has(token.value.toLowerCase())) return true;
-  return /^[a-z]+-[a-z0-9]+$/i.test(token.value);
+  const name = token.value.toLowerCase();
+  return CMDLET_ALIASES.has(name) || KNOWN_CMDLETS.has(name);
 }
 
 /**
@@ -232,6 +270,29 @@ export function statusDeterminingProgram(command: string): string {
 }
 
 /**
+ * Diagnostics that mean the shell itself refused the command line.
+ *
+ * None of these can coexist with "the search ran and found nothing", so any of them is
+ * enough to withhold the benign-exit exemption. Matching one of these on output that was
+ * genuinely a search result would only cost an exemption, which is the direction this file
+ * is allowed to be wrong in.
+ */
+const SHELL_REFUSED = new RegExp(
+  [
+    String.raw`^\s*At line:\d+ char:\d+`,
+    String.raw`The token '[^']*' is not a valid statement separator`,
+    String.raw`ParserError`,
+    String.raw`CommandNotFoundException`,
+    String.raw`ParameterBindingException`,
+    String.raw`is not recognized as (?:the name of )?a (?:cmdlet|command)`,
+    String.raw`is not recognized as an internal or external command`,
+    String.raw`The string (?:is missing the terminator|starting:)`,
+    String.raw`Missing (?:argument|expression|closing|\))`
+  ].join('|'),
+  'im'
+);
+
+/**
  * Whether a non-zero exit is a reported result rather than a failure.
  *
  * Both conditions matter. The program must be one that spends exit 1 on "no matches", and
@@ -241,6 +302,11 @@ export function statusDeterminingProgram(command: string): string {
  */
 export function nonZeroExitIsBenign(command: string, exitCode: number | null, outputText: string): boolean {
   if (exitCode !== 1) return false;
+  // A shell that refused the command never reached the search at all, so reading the exit
+  // code as the search's answer is a fabrication. `Write-Output hi && rg foo` is the case
+  // that matters: Windows PowerShell 5.1 rejects `&&` outright, exits 1 without running a
+  // thing, and this function would otherwise call it ripgrep finding no matches.
+  if (SHELL_REFUSED.test(outputText)) return false;
   const program = statusDeterminingProgram(command);
   if (!NO_MATCH_MEANS_EXIT_1.has(program)) return false;
   return !/^\s*(rg|ripgrep|grep|egrep|fgrep|findstr):/im.test(outputText);
@@ -272,6 +338,35 @@ function isExpandableGlob(token: Token): boolean {
 /** Re-quotes an expanded name for the shell, so it reaches the program verbatim. */
 function quoteArgument(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+/**
+ * One brace group of plain alternatives, e.g. `src/{main,test}/x`.
+ *
+ * Deliberately one group and nothing clever inside it. A brace group is also PowerShell's
+ * script-block syntax, so the pattern has to be narrow enough that `Where-Object { $_ -eq 1 }`
+ * can never match it: no whitespace (the tokenizer already split on that), no `$`, no nested
+ * braces, no quotes, and a comma is required — a lone `{...}` is far more likely to be a
+ * block than a path. Anything outside that shape is left exactly as written.
+ */
+const BRACE_ALTERNATIVES = /^([^{}$'"`|;]*)\{([^{}$'"`|;,]*(?:,[^{}$'"`|;,]*)+)\}([^{}$'"`|;]*)$/;
+
+/**
+ * The paths a bash-style brace group stands for, in the order bash would produce them.
+ *
+ * Purely textual, exactly as the shell it stands in for: the names are not checked against
+ * the disk, because bash does not check either and a caller who typed a path that is not
+ * there is owed ripgrep's own "no such file" rather than a silently shortened list.
+ */
+function expandBraces(token: Token): string[] | null {
+  if (token.quoted) return null;
+  if (token.value.startsWith('-')) return null;
+  const match = BRACE_ALTERNATIVES.exec(token.value);
+  if (!match) return null;
+  const [, prefix = '', body = '', suffix = ''] = match;
+  const parts = body.split(',');
+  if (parts.length < 2 || parts.length > MAX_EXPANDED_NAMES) return null;
+  return parts.map((part) => `${prefix}${part}${suffix}`);
 }
 
 /**
@@ -315,7 +410,17 @@ function expandGlob(pattern: string, list: DirectoryLister): string[] | null {
   return hits;
 }
 
-function normalizeRipgrepSegment(segment: string, list: DirectoryLister): { segment: string; notes: string[] } {
+/**
+ * `allowGlob` is false for every statement after the first. A glob has to be expanded against
+ * the directory the shell would have used, and one statement later that is a guess about what
+ * the statements before it did. Brace expansion carries no such debt — it is pure text, cwd
+ * and filesystem play no part — so it stays on for the whole command line.
+ */
+function normalizeRipgrepSegment(
+  segment: string,
+  list: DirectoryLister,
+  allowGlob: boolean
+): { segment: string; notes: string[] } {
   const tokens = tokenize(segment);
   if (!RIPGREP_NAMES.has(programName(tokens[0]))) return { segment, notes: [] };
 
@@ -345,7 +450,16 @@ function normalizeRipgrepSegment(segment: string, list: DirectoryLister): { segm
       out.push(token.raw);
       continue;
     }
-    const expanded = isExpandableGlob(token) ? expandGlob(token.value, list) : null;
+    const braced = expandBraces(token);
+    if (braced) {
+      out.push(...braced.map(quoteArgument));
+      notes.push(
+        `PowerShell has no brace expansion, so \`${token.value}\` reached ripgrep as one literal name. ` +
+          `It was expanded here to the ${braced.length} paths bash would have produced: ${braced.join(', ')}.`
+      );
+      continue;
+    }
+    const expanded = allowGlob && isExpandableGlob(token) ? expandGlob(token.value, list) : null;
     if (expanded) {
       out.push(...expanded.map(quoteArgument));
       notes.push(
@@ -374,10 +488,12 @@ export function normalizeShellCommand(
   list: DirectoryLister | null = null
 ): NormalizedCommand {
   if (shellType !== 'powershell') return { cmd, notes: [] };
-  if (!/[*?]/.test(cmd)) return { cmd, notes: [] };
-  // Without a directory there is nothing to expand against, and guessing is not available
-  // here: the point of the exercise is that the answer must be the shell's own.
-  if (list === null) return { cmd, notes: [] };
+  if (!/[*?{]/.test(cmd)) return { cmd, notes: [] };
+  // Without a directory there is nothing to expand a glob against, and guessing is not
+  // available here: the point of the exercise is that the answer must be the shell's own.
+  // Brace expansion needs no directory — it is textual — so it still runs, against a listing
+  // that reports the one honest thing it can, which is that it knows of no entries.
+  const entries: DirectoryLister = list ?? ((): readonly string[] => []);
 
   const notes: string[] = [];
   let changed = false;
@@ -386,13 +502,13 @@ export function normalizeShellCommand(
   // Statements and pipeline segments are rebuilt with their own separators intact, so only
   // the segments this file actually rewrote differ from the original text.
   const rebuilt = rebuild(cmd, [';', '&&', '||', '\n'], (statement) => {
-    // Only the first. Nothing has run yet at that point, so the directory listed here is the
-    // directory the shell would have expanded against; one statement later it is a guess
-    // about what the statements before it did to the cwd and to the files in it.
+    // Globs are expanded in the first statement only. Nothing has run yet at that point, so
+    // the directory listed here is the directory the shell would have expanded against; one
+    // statement later it is a guess about what the statements before it did to the cwd and to
+    // the files in it. Brace groups are not asking the filesystem anything and run throughout.
     const first = statementIndex++ === 0;
-    if (!first) return statement;
     return rebuild(statement, ['|'], (segment) => {
-      const result = normalizeRipgrepSegment(segment.trim(), list);
+      const result = normalizeRipgrepSegment(segment.trim(), entries, first);
       if (result.notes.length === 0) return segment;
       changed = true;
       notes.push(...result.notes);
@@ -467,6 +583,21 @@ export function execRecoveryHints(command: string, outputText: string): string[]
       'PowerShell does not expand `*` or `?` for native programs, so the pattern reached the program literally. ' +
         'For ripgrep pass the filename pattern as `-g \'<glob>\'`; otherwise expand it first, e.g. ' +
         '`Get-ChildItem -Path \'<glob>\' | ForEach-Object FullName`.'
+    );
+  }
+
+  // Deliberately a hint and not a rewrite. `A && B` runs B only if A succeeded, and the
+  // nearest thing PowerShell 5.1 has is a guard, not `;` — turning one into the other would
+  // run the gated half of `gradlew test && gradlew publish` after the tests had failed. The
+  // faithful translation is mechanical enough to hand over, and cheap enough to let the model
+  // make. This fires on the shell's own refusal, so it can never misfire on PowerShell 7,
+  // where the operators work and no such error exists.
+  if (/The token '(&&|\|\|)' is not a valid statement separator/i.test(outputText)) {
+    hints.push(
+      'Windows PowerShell 5.1 has no `&&` or `||`, so it refused the whole line and ran nothing. ' +
+        'These are not the same as `;`, which would run the second command even when the first failed: ' +
+        'write `A; if ($?) { B }` for `A && B`, and `A; if (-not $?) { B }` for `A || B`. ' +
+        'Chain longer runs by nesting inside the block rather than repeating the guard.'
     );
   }
 

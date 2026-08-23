@@ -85,6 +85,62 @@ describe('a non-zero exit that is a result rather than a failure', () => {
     expect(nonZeroExitIsBenign('.\\gradlew.bat :app:test', 1, output)).toBe(false);
   });
 
+  it('never exempts a command the shell refused to parse', () => {
+    // Verified in Windows PowerShell 5.1 on this machine: `&&` is rejected outright, nothing
+    // runs, and the exit code is 1. statusDeterminingProgram still reads `rg` off the last
+    // statement, so without this guard a parser error was filed as a search finding nothing.
+    const parserError = [
+      'At line:1 char:17',
+      '+ Write-Output hi && rg foo',
+      '+                 ~~',
+      "The token '&&' is not a valid statement separator in this version.",
+      '    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException'
+    ].join('\n');
+    expect(nonZeroExitIsBenign('Write-Output hi && rg foo', 1, parserError)).toBe(false);
+    expect(nonZeroExitIsBenign('rg foo || Write-Output no', 1, parserError)).toBe(false);
+  });
+
+  it('never exempts a search the shell could not even find', () => {
+    const notFound = [
+      "rg : The term 'rg' is not recognized as the name of a cmdlet, function, script file, " +
+        'or operable program.',
+      '    + CategoryInfo          : ObjectNotFound: (rg:String) [], CommandNotFoundException'
+    ].join('\n');
+    expect(nonZeroExitIsBenign('rg -n foo src', 1, notFound)).toBe(false);
+  });
+
+  it('never exempts a real failure in a hyphenated program later in the pipeline', () => {
+    // `docker-compose` has the shape of a cmdlet and is a native program. Reading it as one of
+    // PowerShell's own would skip it, hand the exit code back to ripgrep, and launder its
+    // failure into "no matches".
+    const output = ['Process exited with code 1', 'Output:', 'error: no configuration file provided'].join(
+      '\n'
+    );
+    expect(statusDeterminingProgram('rg -n foo src | docker-compose up')).toBe('docker-compose');
+    expect(nonZeroExitIsBenign('rg -n foo src | docker-compose up', 1, output)).toBe(false);
+    expect(statusDeterminingProgram('rg -n foo src | tunnel-client --strict')).toBe('tunnel-client');
+  });
+
+  it('never exempts a program whose name is built from an approved PowerShell verb', () => {
+    // The near-miss fix for the line above was to require an approved verb before the hyphen,
+    // which these three defeat: they are executables spelled exactly like cmdlets. Only an
+    // exact cmdlet name can be trusted, so an unrecognised Verb-Noun has to count as native.
+    const output = 'Process exited with code 1\nOutput:\n2 suites failed\n';
+    expect(statusDeterminingProgram('rg x src | test-runner')).toBe('test-runner');
+    expect(nonZeroExitIsBenign('rg x src | test-runner', 1, output)).toBe(false);
+    expect(statusDeterminingProgram('rg x src | build-tool --ci')).toBe('build-tool');
+    expect(statusDeterminingProgram('rg x src | get-version')).toBe('get-version');
+  });
+
+  it('still reads through the cmdlets it does know', () => {
+    // The exemption has to survive, or the benign-exit rule stops firing on the real corpus:
+    // these are the stage heads that actually follow a search in recorded sessions.
+    expect(statusDeterminingProgram('rg x src | Select-Object -First 5')).toBe('rg');
+    expect(statusDeterminingProgram('rg x src | Where-Object { $_ } | Format-Table')).toBe('rg');
+    expect(statusDeterminingProgram('rg x src | ForEach-Object { $_ } | Out-Null')).toBe('rg');
+    expect(nonZeroExitIsBenign('rg x src | Sort-Object | Measure-Object', 1, '')).toBe(true);
+  });
+
   it('never exempts an exit code other than 1', () => {
     const clean = 'Process exited with code 2\nOutput:\n';
     // ripgrep reserves 2 for real errors, which is what makes exempting 1 safe at all.
@@ -130,6 +186,53 @@ describe('globs PowerShell will not expand for a native program', () => {
     expect(result.cmd).not.toContain('-g');
     expect(result.cmd).not.toContain('sub');
     expect(result.cmd).toBe("rg -n 'x' 'top_test.go' 'zz_test.go'");
+  });
+
+  it('expands a bash brace group into the paths bash would have produced', () => {
+    // Straight from the corpus: the model writes one path with alternatives, PowerShell has no
+    // brace expansion, and ripgrep is handed a single directory name that does not exist.
+    const result = normalizeShellCommand('rg -n "AppGraph" app/src/{main,test}/java', 'powershell', cwd);
+    expect(result.cmd).toBe("rg -n \"AppGraph\" 'app/src/main/java' 'app/src/test/java'");
+    expect(result.notes.join(' ')).toMatch(/no brace expansion/i);
+  });
+
+  it('expands braces without a directory listing, because the expansion is textual', () => {
+    // Unlike a glob, a brace group needs nothing from the disk — and is not checked against it
+    // either, so a path that is not there still earns ripgrep's own error rather than silence.
+    const result = normalizeShellCommand('rg -n x src/{a,b}', 'powershell', null);
+    expect(result.cmd).toBe("rg -n x 'src/a' 'src/b'");
+  });
+
+  it('never mistakes a script block for a brace group', () => {
+    // The danger the narrow pattern exists for: `{ … }` is PowerShell's own syntax, and
+    // rewriting one into a list of paths would destroy the command.
+    for (const cmd of [
+      'rg -n x . | Where-Object { $_ -match "a,b" }',
+      'rg -n x . | ForEach-Object { $_.Trim(),$_.Length }',
+      "rg -n 'a{2,3}' src"
+    ]) {
+      expect(normalizeShellCommand(cmd, 'powershell', cwd).cmd).toBe(cmd);
+      expect(normalizeShellCommand(cmd, 'powershell', cwd).notes).toEqual([]);
+    }
+  });
+
+  it('leaves a brace group alone when it is quoted or holds no alternative', () => {
+    // A quoted group was protected on purpose, and a comma is what separates a path from a
+    // regex quantifier or a block — without one there is nothing to expand.
+    for (const cmd of ["rg -n x 'src/{a,b}'", 'rg -n x src/{a}', 'rg -n x src/{$env:X,b}']) {
+      expect(normalizeShellCommand(cmd, 'powershell', cwd).cmd).toBe(cmd);
+    }
+  });
+
+  it('expands braces after the first statement, where a glob would be left alone', () => {
+    // The asymmetry is the point: the brace group means the same thing wherever it appears,
+    // while the glob one statement later would be answered from the wrong directory.
+    const mixed = "$ErrorActionPreference='Stop'; rg -n x app/{main,test}";
+    const result = normalizeShellCommand(mixed, 'powershell', cwd);
+    expect(result.cmd).toBe("$ErrorActionPreference='Stop'; rg -n x 'app/main' 'app/test'");
+    expect(normalizeShellCommand("Set-Location sub; rg -n x *_test.go", 'powershell', cwd).cmd).toBe(
+      'Set-Location sub; rg -n x *_test.go'
+    );
   });
 
   it('leaves everything after the first statement alone', () => {
@@ -242,6 +345,24 @@ describe('saying what to do next', () => {
   it('explains an unexpanded glob rather than leaving the code to be guessed at', () => {
     const hints = execRecoveryHints('rg -n x C:\\a\\b*', 'rg: C:\\a\\b*: IO error … (os error 123)');
     expect(hints.join(' ')).toMatch(/PowerShell does not expand/);
+  });
+
+  it('hands over the guard form when PowerShell 5.1 refused && or ||', () => {
+    const refusal = "The token '&&' is not a valid statement separator in this version.";
+    const hints = execRecoveryHints('npm test && npm publish', refusal);
+    expect(hints).toHaveLength(1);
+    // The point of the hint is the conditional, so it has to carry the guard and say why `;`
+    // is not the answer — a model told only "use ;" would publish after a failing test run.
+    expect(hints[0]).toMatch(/if \(\$\?\) \{ B \}/);
+    expect(hints[0]).toMatch(/if \(-not \$\?\) \{ B \}/);
+    expect(hints[0]).toMatch(/not the same as `;`/);
+    expect(execRecoveryHints('a || b', "The token '||' is not a valid statement separator in this version.")).toHaveLength(1);
+  });
+
+  it('stays silent on a shell where the operators work', () => {
+    // PowerShell 7 runs `&&` without complaint, so there is no refusal text and no hint. The
+    // hint keys off the shell's own error, never off the command containing the operator.
+    expect(execRecoveryHints('npm test && npm publish', 'ok')).toHaveLength(0);
   });
 
   it('stays silent on a healthy result', () => {

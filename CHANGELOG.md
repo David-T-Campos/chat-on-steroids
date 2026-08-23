@@ -9,6 +9,64 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [1.9.7] — 2026-08-23
+
+1.9.6 was tagged but never published: its CI run failed and the release job failed with it, so
+nothing in that section has reached anyone yet. It ships here, together with the fixes below.
+
+### Fixed
+- **A real failure could be recorded as a search that found nothing.** 1.9.6 exempted exit 1 from
+  `rg`, `grep` and `findstr`, and decided which program set it by walking the pipeline from the
+  right and skipping anything that looked like a PowerShell cmdlet. "Looked like" was any bare
+  `verb-noun` token, and external executables are hyphenated too — so in `rg foo | docker-compose
+  up`, the real failing stage was skipped, ripgrep was named as the status-determining program,
+  and a build failure was stored as a result. Name shape cannot prove what a token is, so the
+  inference is gone: an exact list of known cmdlets and aliases is treated as non-native and
+  everything else is assumed to be a program. Not knowing a real cmdlet now costs an exemption,
+  which is the safe direction to be wrong in.
+- **A command the shell refused to run could be recorded as a search that found nothing.** The
+  same exemption looked only at whether the output began with `rg:` or `grep:`. Windows
+  PowerShell 5.1 answers `Write-Output hi && rg foo` with a parser error and exit 1 — nothing ran
+  at all — and that was stored as a successful empty search. Shell and parser failures, missing
+  commands and binding errors can no longer take the benign-exit path, whatever program the line
+  would have ended in.
+
+### Added
+- **`{a,b}` brace groups are expanded the way bash would have expanded them.** PowerShell has no
+  brace expansion, so `rg TODO src/{main,shared}` reached ripgrep with the braces intact and
+  failed on a path that does not exist. The expansion is textual and needs no directory listing,
+  so unlike glob expansion it applies to every statement of a command line rather than only the
+  first. It is deliberately narrow: quoted tokens, flags, nested braces and anything holding a
+  `|` or `;` are left exactly as written, and a script block `{ ... }` is never mistaken for one.
+- **PowerShell 5.1 says what to write instead of `&&` and `||`.** These are not translated. `A;
+  B` is not what `A && B` means — it runs B even when A failed, which can be a destructive
+  follow-up that should have been gated — so the shell's own refusal is answered with the
+  guarded forms instead: `A; if ($?) { B }` for `A && B`, and `A; if (-not $?) { B }` for
+  `A || B`. The hint fires only on the parser error itself, so it stays silent on a shell where
+  the operators work.
+- **Two habits that fail without explaining themselves are stated up front.** The server
+  instructions now say that `2>&1` on a native program leaves `$?` false even when the program
+  exited 0, and give both chain-operator rewrites. Neither can be normalised away — stripping the
+  redirect changes what the command returns — so they are said once rather than repaired after
+  the fact.
+
+### Internal
+- The MCP shutdown test synchronises inside the PowerShell process it already started, instead of
+  spawning a second `node` to write the file it waits for. 1.9.6 reintroduced that cold spawn and
+  raised the wait to 15 seconds; on a hosted Windows runner the spawn outran the whole budget and
+  failed the release. The early diagnostic that reports what the server actually answered is back
+  with it, so a request that finishes before the command starts says so instead of timing out.
+- The real-console test drives `cmd.exe` instead of a cold `powershell.exe`. The subject is
+  ConPTY, not any one shell, and on a hosted runner PowerShell took longer to produce its first
+  byte than the whole wait allowed — while the console tests either side of it passed in about a
+  second. `mode con` asks the console for its own size, which a pipe cannot answer at all, so the
+  proof is unchanged and the cold start is gone. `mode con` translates its labels, so the
+  assertions read the number the console reported rather than the English word in front of it.
+- The three window-state tests find a window before asking for its state, the way the window
+  tests beside them already do. A hosted runner can have no visible desktop window at all, and
+  `WINDOW_NOT_FOUND` is the correct production answer to that — asserting the runner has a
+  desktop was the test's mistake, not the helper's.
+
 ## [1.9.6] — 2026-08-23
 
 ### Fixed
