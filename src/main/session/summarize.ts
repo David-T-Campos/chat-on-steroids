@@ -437,6 +437,27 @@ function build(
         }
         case 'finish':
           return { kind: 'agent', tone: 'good', title: 'Reported the finished task' };
+        case 'goal_create':
+          return {
+            kind: 'agent',
+            tone: 'good',
+            title: `Created goal ${str(args['title']) ?? ''}`.trim()
+          };
+        case 'goal_add_tasks':
+          return {
+            kind: 'agent',
+            tone: 'good',
+            title: `Added ${plural(arr(args['tasks']).length, 'goal task')}`
+          };
+        case 'goal_assign': {
+          const provider = str(args['provider']);
+          const label = provider === 'claude-code' ? 'Claude Code' : provider === 'hermes' ? 'Hermes Agent' : 'ChatGPT';
+          return { kind: 'agent', tone: 'good', title: `Assigned task to ${label}` };
+        }
+        case 'goal_status':
+          return { kind: 'agent', tone: 'neutral', title: 'Checked goal status' };
+        case 'task_cancel':
+          return { kind: 'agent', tone: 'warn', title: 'Cancelled goal task' };
         default:
           return {
             kind: 'agent',

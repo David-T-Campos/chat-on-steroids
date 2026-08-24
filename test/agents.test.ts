@@ -59,6 +59,7 @@ const { initDurableStore } = await import('../src/main/durable.js');
 const { initSessionStore, resetSessionStoreForTests } = await import('../src/main/session/store.js');
 const { recordChatObservations, resetRecorderForTests } = await import('../src/main/session/recorder.js');
 const { DEFAULT_CAPABILITIES } = await import('../src/shared/types.js');
+const { goalState, onGoalsPersistNow, resetGoalsForTests } = await import('../src/main/goals.js');
 const { makeTempDir, removeTempDir } = await import('./helpers.js');
 
 let dir: string;
@@ -84,6 +85,8 @@ afterAll(async () => {
 
 beforeEach(() => {
   resetAgentsForTests();
+  resetGoalsForTests();
+  onGoalsPersistNow(async () => undefined);
   resetRecorderForTests();
   // The real app wires the broker's immediate persistence sink during startup. MCP endpoint
   // tests exercise that production contract rather than an intentionally half-wired broker;
@@ -676,9 +679,10 @@ describe('through the MCP endpoint', () => {
     await endpoint.stop();
   });
 
-  // One flat tool with five actions. The names it replaced are gone outright, not aliased,
+  // One flat tool for transient workers and durable goals. The names it replaced are gone
+  // outright, not aliased,
   // so a chat still holding the old instructions gets an honest unknown-tool error.
-  it('publishes one agents tool with exactly four actions', async () => {
+  it('publishes one agents tool with worker and goal orchestration actions', async () => {
     const reply = await post({ jsonrpc: '2.0', id: nextId++, method: 'tools/list', params: {} });
     const names = (reply.result.tools as Array<{ name: string }>).map((tool) => tool.name);
     expect(names).toContain('agents');
@@ -697,7 +701,19 @@ describe('through the MCP endpoint', () => {
     const schema = (reply.result.tools as Array<{ name: string; inputSchema: any }>).find(
       (tool) => tool.name === 'agents'
     )!.inputSchema;
-    expect(schema.properties.action.enum.slice().sort()).toEqual(['finish', 'message', 'spawn', 'status']);
+    expect(schema.properties.action.enum.slice().sort()).toEqual(
+      [
+        'finish',
+        'goal_add_tasks',
+        'goal_assign',
+        'goal_create',
+        'goal_status',
+        'message',
+        'spawn',
+        'status',
+        'task_cancel'
+      ].sort()
+    );
     // Revive is gone from the wire as well as from the broker: no field survives for it.
     expect(Object.keys(schema.properties)).not.toContain('agent');
   });
@@ -751,6 +767,74 @@ describe('through the MCP endpoint', () => {
     expect(text).not.toContain('worker-1');
     expect(text).not.toContain('task 1');
     expect(text).not.toContain(PRIME_CHAT);
+  });
+
+  it('binds a durable goal to its creating conversation and reveals nothing to a stranger', async () => {
+    const created = await structuredAsChat('c-goal-owner', 'goal_create', {
+      title: 'Release mission',
+      objective: 'Ship the orchestration control plane',
+      tasks: [{ title: 'Review bridge', acceptance: 'Return file and line evidence' }]
+    });
+    expect(created.action).toBe('goal_create');
+    const goal = created.goal as Record<string, any>;
+    expect(goal).toMatchObject({ title: 'Release mission', status: 'active' });
+    expect(JSON.stringify(goal)).not.toContain('c-goal-owner');
+
+    const owner = await structuredAsChat('c-goal-owner', 'goal_status', { goal_id: goal.id });
+    expect((owner.goal as Record<string, unknown>).title).toBe('Release mission');
+
+    const stranger = await asChat('c-goal-stranger', 'goal_status', { goal_id: goal.id });
+    expect(stranger).toMatch(/GOAL_ACCESS_DENIED|owner|conversation/i);
+    expect(stranger).not.toContain('Release mission');
+    expect(stranger).not.toContain('Review bridge');
+  });
+
+  it('assigns a goal task to a ChatGPT worker and completes it from that worker finish', async () => {
+    const created = await structuredAsChat('c-goal-prime', 'goal_create', {
+      title: 'Parallel review',
+      objective: 'Use a separate ChatGPT conversation',
+      tasks: [{ title: 'Audit attribution', acceptance: 'Report exact findings' }]
+    });
+    const goal = created.goal as Record<string, any>;
+    const taskId = goal.tasks[0].id as string;
+
+    const assigned = await structuredAsChat('c-goal-prime', 'goal_assign', {
+      goal_id: goal.id,
+      task_id: taskId,
+      provider: 'chatgpt'
+    });
+    expect(assigned).toMatchObject({ action: 'goal_assign', provider: 'chatgpt', worker_id: 'worker-1' });
+    expect(goalState(goal.id).goals[0]!.tasks[0]).toMatchObject({
+      status: 'running',
+      provider: 'chatgpt',
+      runId: 'worker-1'
+    });
+
+    expect(bindConversation('worker-1', 'c-goal-worker')).toBe(true);
+    const finished = await asChat('c-goal-worker', 'finish', { result: 'RESULT: attribution is correct' });
+    expect(finished).toMatch(/finished|done/i);
+    expect(goalState(goal.id).goals[0]!.tasks[0]).toMatchObject({
+      status: 'completed',
+      result: 'RESULT: attribution is correct'
+    });
+  });
+
+  it('requires live command permission before assigning Claude or Hermes', async () => {
+    const created = await structuredAsChat('c-external-owner', 'goal_create', {
+      title: 'External review',
+      objective: 'Use a local provider safely',
+      tasks: [{ title: 'Hermes review', acceptance: 'Return findings' }]
+    });
+    const goal = created.goal as Record<string, any>;
+    const denied = await asChat('c-external-owner', 'goal_assign', {
+      goal_id: goal.id,
+      task_id: goal.tasks[0].id,
+      provider: 'hermes',
+      workdir: '/workspace'
+    });
+
+    expect(denied).toMatch(/TOOL_DISABLED|command|read-only/i);
+    expect(goalState(goal.id).goals[0]!.tasks[0]).toMatchObject({ status: 'queued', provider: null });
   });
 
   it('refuses a control call it cannot place at all, and says where to look', async () => {

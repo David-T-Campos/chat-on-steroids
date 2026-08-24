@@ -760,7 +760,9 @@ describe('surface boundaries', () => {
           : tool.name === 'apply_patch'
             ? 5_000
             : tool.name === 'agents'
-              ? 3_400
+              // Nine explicit orchestration actions (the four transient worker actions plus
+              // five durable goal actions) still cost one schema and measure 4.95 KiB.
+              ? 5_200
               : tool.name === 'power'
                 ? 3_500
                 : 3_000;

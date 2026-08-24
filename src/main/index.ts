@@ -41,7 +41,13 @@ import {
   setContinuationRecoveryHooks,
   type ContinuationSnapshot
 } from './session/continuation.js';
-import { onGoalsPersist, restoreGoals, snapshotGoals, type GoalsSnapshot } from './goals.js';
+import {
+  onGoalsPersist,
+  onGoalsPersistNow,
+  restoreGoals,
+  snapshotGoals,
+  type GoalsSnapshot
+} from './goals.js';
 import { stopAllAgentTasks } from './agent-runner.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
@@ -222,6 +228,7 @@ void app.whenReady().then(async () => {
   onSwarmPersist(() => writeDurableSoon(SWARM_STATE, snapshotSwarm()));
   onSwarmPersistNow((snapshot) => writeDurableNow(SWARM_STATE, snapshot));
   onGoalsPersist(() => writeDurableSoon(GOALS_STATE, snapshotGoals()));
+  onGoalsPersistNow((snapshot) => writeDurableNow(GOALS_STATE, snapshot));
   restoreGoals(await readDurable<GoalsSnapshot>(GOALS_STATE));
 
   // A multi-agent run outlives this process. Restoring it before the bridge starts

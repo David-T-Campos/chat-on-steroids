@@ -42,7 +42,12 @@ const taskSchema: z.ZodType<GoalTask> = z.object({
   startedAt: z.number().int().nonnegative().nullable(),
   finishedAt: z.number().int().nonnegative().nullable()
 });
-const goalSchema: z.ZodType<Goal> = z.object({
+interface StoredGoal extends Goal {
+  /** Exact browser conversation proved at creation; deliberately omitted from every public projection. */
+  ownerConversationId: string | null;
+}
+
+const goalSchema: z.ZodType<StoredGoal> = z.object({
   id: idSchema.refine((value) => value.startsWith('goal_')),
   title: z.string().min(1).max(MAX_TITLE_CHARS),
   objective: z.string().min(1).max(MAX_OBJECTIVE_CHARS),
@@ -50,7 +55,8 @@ const goalSchema: z.ZodType<Goal> = z.object({
   tasks: z.array(taskSchema).max(MAX_TASKS_PER_GOAL),
   createdAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative(),
-  completedAt: z.number().int().nonnegative().nullable()
+  completedAt: z.number().int().nonnegative().nullable(),
+  ownerConversationId: z.string().min(1).max(500).nullable()
 });
 const snapshotSchema = z.object({ version: z.literal(1), goals: z.array(goalSchema).max(MAX_GOALS) });
 
@@ -72,12 +78,20 @@ export interface GoalAssignment {
 
 export interface GoalsSnapshot {
   version: 1;
-  goals: Goal[];
+  goals: StoredGoal[];
 }
 
-const goals = new Map<string, Goal>();
+export interface GoalOwner {
+  ownerConversationId?: string | null;
+}
+
+const goals = new Map<string, StoredGoal>();
 const listeners = new Set<() => void>();
 let persist: (() => void) | null = null;
+let persistNow: ((snapshot: GoalsSnapshot) => Promise<void>) | null = null;
+let criticalMutationRevision = 0;
+let persistedCriticalRevision = 0;
+let criticalPersistFlight: Promise<boolean> | null = null;
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -92,23 +106,24 @@ function cleanText(value: string, label: string, max: number): string {
 }
 
 function changed(): void {
+  criticalMutationRevision += 1;
   persist?.();
   for (const listener of listeners) listener();
 }
 
-function goalById(goalId: string): Goal {
+function goalById(goalId: string): StoredGoal {
   const goal = goals.get(goalId);
   if (!goal) throw new Error(`Unknown goal id: ${goalId}`);
   return goal;
 }
 
-function taskById(goal: Goal, taskId: string): GoalTask {
+function taskById(goal: StoredGoal, taskId: string): GoalTask {
   const task = goal.tasks.find((candidate) => candidate.id === taskId);
   if (!task) throw new Error(`Unknown task id: ${taskId}`);
   return task;
 }
 
-function ensureActive(goal: Goal): void {
+function ensureActive(goal: StoredGoal): void {
   if (goal.status !== 'active') throw new Error(`Goal ${goal.id} is ${goal.status}, not active`);
 }
 
@@ -135,7 +150,7 @@ function newTask(input: NewGoalTask, at: number): GoalTask {
   };
 }
 
-function refreshGoal(goal: Goal, at: number): void {
+function refreshGoal(goal: StoredGoal, at: number): void {
   goal.updatedAt = at;
   if (goal.tasks.length > 0 && goal.tasks.every((task) => task.status === 'completed')) {
     goal.status = 'completed';
@@ -153,7 +168,37 @@ export function onGoalsPersist(handler: (() => void) | null): void {
   persist = handler;
 }
 
-export function createGoal(input: NewGoal): Goal {
+export function onGoalsPersistNow(handler: ((snapshot: GoalsSnapshot) => Promise<void>) | null): void {
+  persistNow = handler;
+}
+
+/** Drains every accepted ledger revision through the host's atomic durable writer. */
+export async function persistCriticalGoalsNow(): Promise<boolean> {
+  if (!persistNow) return false;
+  if (persistedCriticalRevision >= criticalMutationRevision) return true;
+  if (!criticalPersistFlight) {
+    criticalPersistFlight = (async () => {
+      while (persistedCriticalRevision < criticalMutationRevision) {
+        const handler = persistNow;
+        if (!handler) return false;
+        const targetRevision = criticalMutationRevision;
+        await handler(snapshotGoals());
+        persistedCriticalRevision = Math.max(persistedCriticalRevision, targetRevision);
+      }
+      return true;
+    })().finally(() => {
+      criticalPersistFlight = null;
+    });
+  }
+  return criticalPersistFlight;
+}
+
+function publicGoal(goal: StoredGoal): Goal {
+  const { ownerConversationId: _ownerConversationId, ...visible } = goal;
+  return clone(visible);
+}
+
+export function createGoal(input: NewGoal, owner: GoalOwner = {}): Goal {
   if (goals.size >= MAX_GOALS) throw new Error(`Too many goals (limit ${MAX_GOALS})`);
   const taskInputs = input.tasks ?? [];
   if (taskInputs.length > MAX_TASKS_PER_GOAL) {
@@ -163,7 +208,14 @@ export function createGoal(input: NewGoal): Goal {
   // Validate every field before publishing the goal, so an invalid later task cannot leave
   // a partial ledger entry behind.
   const tasks = taskInputs.map((task) => newTask(task, at));
-  const goal: Goal = {
+  const ownerConversationId = owner.ownerConversationId ?? null;
+  if (
+    ownerConversationId !== null &&
+    (typeof ownerConversationId !== 'string' || ownerConversationId.length === 0 || ownerConversationId.length > 500)
+  ) {
+    throw new Error('Goal owner conversation identity is invalid');
+  }
+  const goal: StoredGoal = {
     id: `goal_${randomUUID()}`,
     title: cleanText(input.title, 'Goal title', MAX_TITLE_CHARS),
     objective: cleanText(input.objective, 'Goal objective', MAX_OBJECTIVE_CHARS),
@@ -171,11 +223,48 @@ export function createGoal(input: NewGoal): Goal {
     tasks,
     createdAt: at,
     updatedAt: at,
-    completedAt: null
+    completedAt: null,
+    ownerConversationId
   };
   goals.set(goal.id, goal);
   changed();
-  return clone(goal);
+  return publicGoal(goal);
+}
+
+export function assertGoalOwner(goalId: string, conversationId: string | null | undefined): void {
+  if (!conversationId) throw new Error('GOAL_IDENTITY_REQUIRED: this goal action needs an exact conversation identity.');
+  const goal = goalById(goalId);
+  if (!goal.ownerConversationId || goal.ownerConversationId !== conversationId) {
+    throw new Error('GOAL_ACCESS_DENIED: this goal belongs to a different conversation.');
+  }
+}
+
+/** Moves every goal owned by chat A to chat B during the app's authenticated continuation commit. */
+export function transferGoalOwnership(fromConversationId: string, toConversationId: string): number {
+  if (!fromConversationId || !toConversationId || fromConversationId === toConversationId) return 0;
+  let moved = 0;
+  const at = Date.now();
+  for (const goal of goals.values()) {
+    if (goal.ownerConversationId !== fromConversationId) continue;
+    goal.ownerConversationId = toConversationId;
+    goal.updatedAt = at;
+    moved += 1;
+  }
+  if (moved > 0) changed();
+  return moved;
+}
+
+export function runningGoalTaskForProviderRun(
+  provider: AgentProvider,
+  runId: string
+): { goalId: string; task: GoalTask } | null {
+  for (const goal of goals.values()) {
+    const task = goal.tasks.find(
+      (candidate) => candidate.status === 'running' && candidate.provider === provider && candidate.runId === runId
+    );
+    if (task) return { goalId: goal.id, task: clone(task) };
+  }
+  return null;
 }
 
 export function addGoalTasks(goalId: string, inputs: NewGoalTask[]): Goal {
@@ -190,7 +279,7 @@ export function addGoalTasks(goalId: string, inputs: NewGoalTask[]): Goal {
   goal.tasks.push(...additions);
   goal.updatedAt = at;
   changed();
-  return clone(goal);
+  return publicGoal(goal);
 }
 
 export function assignGoalTask(goalId: string, taskId: string, assignment: GoalAssignment): GoalTask {
@@ -198,9 +287,19 @@ export function assignGoalTask(goalId: string, taskId: string, assignment: GoalA
   ensureActive(goal);
   const task = taskById(goal, taskId);
   if (task.status !== 'queued') throw new Error(`Task ${task.id} is not queued (state ${task.status})`);
+  const runId = runIdSchema.parse(assignment.runId);
+  for (const candidate of goals.values()) {
+    if (
+      candidate.tasks.some(
+        (other) => other.status === 'running' && other.provider === assignment.provider && other.runId === runId
+      )
+    ) {
+      throw new Error(`Provider run ${runId} is already assigned to another task`);
+    }
+  }
   const at = Date.now();
   task.provider = providerSchema.parse(assignment.provider);
-  task.runId = runIdSchema.parse(assignment.runId);
+  task.runId = runId;
   task.status = 'running';
   task.startedAt = at;
   task.updatedAt = at;
@@ -262,12 +361,12 @@ export function cancelGoalTask(goalId: string, taskId: string): GoalTask {
 }
 
 export function goalState(goalId?: string): GoalsState {
-  if (goalId !== undefined) return { goals: [clone(goalById(goalId))] };
-  return { goals: [...goals.values()].map((goal) => clone(goal)) };
+  if (goalId !== undefined) return { goals: [publicGoal(goalById(goalId))] };
+  return { goals: [...goals.values()].map((goal) => publicGoal(goal)) };
 }
 
 export function snapshotGoals(): GoalsSnapshot {
-  return { version: 1, goals: goalState().goals };
+  return { version: 1, goals: [...goals.values()].map((goal) => clone(goal)) };
 }
 
 /**
@@ -277,7 +376,7 @@ export function snapshotGoals(): GoalsSnapshot {
 export function restoreGoals(snapshot: GoalsSnapshot | null): void {
   const parsed = snapshotSchema.safeParse(snapshot);
   if (!parsed.success) return;
-  const restored = new Map<string, Goal>();
+  const restored = new Map<string, StoredGoal>();
   const at = Date.now();
   for (const candidate of parsed.data.goals) {
     if (restored.has(candidate.id)) return;
@@ -307,4 +406,8 @@ export function resetGoalsForTests(): void {
   goals.clear();
   listeners.clear();
   persist = null;
+  persistNow = null;
+  criticalMutationRevision = 0;
+  persistedCriticalRevision = 0;
+  criticalPersistFlight = null;
 }

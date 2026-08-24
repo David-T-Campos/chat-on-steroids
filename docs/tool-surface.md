@@ -86,16 +86,24 @@ Compact & Resume is app/browser orchestration. There is no model-visible `save_h
 
 ### `agents`
 
-Available while multi-agent mode is enabled. It has exactly four actions:
+Available while multi-agent mode is enabled. It remains one composite schema with nine actions:
 
 - `spawn` creates worker chats from one shared context plus per-worker tasks.
 - `message` sends one message or an all-or-nothing batch.
 - `status` reports the run and workers.
 - `finish` is the worker's terminal handoff to the prime.
+- `goal_create` creates a durable objective with bounded, acceptance-tested tasks.
+- `goal_add_tasks` adds bounded tasks to the creating conversation's active goal.
+- `goal_assign` assigns one queued task to a ChatGPT worker, Claude Code, or Hermes Agent.
+- `goal_status` reconciles provider processes and returns the durable goal state.
+- `task_cancel` stops one running task and records the cancellation.
 
 There is no model-supplied agent credential or `agent_key`. Worker/prime identity is bound to
 the ChatGPT conversation using extension evidence; control calls fail closed when that identity
-cannot be proven.
+cannot be proven. Goal ownership uses that same exact conversation evidence and is omitted from
+all public goal projections. Claude Code and Hermes are launched as fixed, shell-free argv only
+when command permission is live, read-only mode is off and the workdir resolves inside an approved
+root; each CLI keeps its own authentication, so no provider credential enters MCP or the extension.
 
 ## Desktop tools
 

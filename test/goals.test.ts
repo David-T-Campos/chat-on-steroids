@@ -2,15 +2,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   addGoalTasks,
+  assertGoalOwner,
   assignGoalTask,
   completeGoalTask,
   createGoal,
   failGoalTask,
   goalState,
   onGoalsChange,
+  onGoalsPersistNow,
+  persistCriticalGoalsNow,
   resetGoalsForTests,
   restoreGoals,
-  snapshotGoals
+  snapshotGoals,
+  transferGoalOwnership
 } = await import('../src/main/goals.js');
 
 beforeEach(() => resetGoalsForTests());
@@ -68,6 +72,32 @@ describe('goal creation', () => {
     created.title = 'mutated outside';
     expect(goalState(created.id).goals[0]!.title).toBe('Control plane');
   });
+
+  it('keeps chat ownership out of public state and refuses a different conversation', () => {
+    const goal = createGoal(
+      { title: 'Private goal', objective: 'Only its creating chat may control it' },
+      { ownerConversationId: 'c-owner' }
+    );
+
+    expect(JSON.stringify(goal)).not.toContain('c-owner');
+    expect(JSON.stringify(goalState(goal.id))).not.toContain('c-owner');
+    expect(() => assertGoalOwner(goal.id, 'c-owner')).not.toThrow();
+    expect(() => assertGoalOwner(goal.id, 'c-stranger')).toThrow(/access|owner|conversation/i);
+    expect(() => assertGoalOwner(goal.id, null)).toThrow(/identity|conversation/i);
+  });
+
+  it('moves goal ownership idempotently when Compact & Resume moves the chat', () => {
+    const first = createGoal(
+      { title: 'Long goal', objective: 'Survive chat compaction' },
+      { ownerConversationId: 'c-before' }
+    );
+    createGoal({ title: 'Other goal', objective: 'Stay with its owner' }, { ownerConversationId: 'c-other' });
+
+    expect(transferGoalOwnership('c-before', 'c-after')).toBe(1);
+    expect(transferGoalOwnership('c-before', 'c-after')).toBe(0);
+    expect(() => assertGoalOwner(first.id, 'c-before')).toThrow(/access/i);
+    expect(() => assertGoalOwner(first.id, 'c-after')).not.toThrow();
+  });
 });
 
 describe('task lifecycle', () => {
@@ -112,6 +142,21 @@ describe('task lifecycle', () => {
 });
 
 describe('durable recovery', () => {
+  it('crosses an explicit durable barrier before a caller may publish success', async () => {
+    createGoal({ title: 'Durable acceptance', objective: 'Write the accepted revision now' });
+    expect(await persistCriticalGoalsNow()).toBe(false);
+
+    const writes: unknown[] = [];
+    onGoalsPersistNow(async (snapshot) => {
+      writes.push(snapshot);
+    });
+    expect(await persistCriticalGoalsNow()).toBe(true);
+    expect(writes).toHaveLength(1);
+    expect(JSON.stringify(writes[0])).toContain('Durable acceptance');
+    expect(await persistCriticalGoalsNow()).toBe(true);
+    expect(writes).toHaveLength(1);
+  });
+
   it('round-trips completed work and marks an in-flight process interrupted after restart', () => {
     const goal = createGoal({
       title: 'Restart recovery',

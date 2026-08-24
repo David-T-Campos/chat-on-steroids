@@ -87,7 +87,7 @@ export interface SurfaceDefinition {
  *    That is part of the coding loop rather than an extra, and a chat that had to ask the
  *    user to connect something before it could look up what it already did would be worse
  *    than one that simply guessed.
- *  - `agents` is one flat tool and is registered only while multi-agent mode is on.
+ *  - `agents` is one flat worker/goal orchestration tool and is registered only while multi-agent mode is on.
  *    Fresh installs enable it; an existing config that keeps it off still pays nothing for
  *    it here. A dedicated connector for one conditional schema is pure setup overhead with
  *    no discovery benefit.
@@ -105,8 +105,8 @@ const CORE: SurfaceDefinition = {
     'Use for: opening and reading files, searching a repository, applying patches, creating, renaming and deleting files, ' +
     'running builds, tests, linters, git, npm and PowerShell, continuing long-running or interactive terminal sessions, ' +
     'and inspecting Windows system/process state or terminating one process tree. ' +
-    'Also resumes earlier work from a saved handoff brief, and — when the user has enabled it — spawns and coordinates ' +
-    'worker agents, subagents or a parallel swarm across several ChatGPT conversations.',
+    'Also resumes earlier work from a saved handoff brief, and — when the user has enabled it — creates persistent goals, ' +
+    'spawns and coordinates worker agents across ChatGPT conversations, and assigns bounded tasks to local Claude Code or Hermes Agent CLIs.',
   cardSummary: 'Files, patches, the terminal and bounded host operations. Required — this is the coding connector.',
   required: true,
   tools: ['read', 'view_image', 'find', 'apply_patch', 'exec_command', 'write_stdin', 'power', 'session', 'agents']

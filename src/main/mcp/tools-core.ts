@@ -95,6 +95,7 @@ import { locateRipgrep } from '../ripgrep.js';
 import { ensureDevToolchain } from '../toolchain.js';
 import {
   agentForCaller,
+  clearAgent,
   currentRunId,
   finishAgent,
   identify,
@@ -107,6 +108,18 @@ import {
   swarmState,
   type Caller
 } from '../agents.js';
+import {
+  addGoalTasks,
+  assignGoalTask,
+  assertGoalOwner,
+  cancelGoalTask,
+  completeGoalTask,
+  createGoal,
+  goalState,
+  persistCriticalGoalsNow,
+  runningGoalTaskForProviderRun
+} from '../goals.js';
+import { cancelAgentTask, refreshAgentTask, startAgentTask } from '../agent-runner.js';
 import {
   currentCall,
   currentCaller,
@@ -1050,7 +1063,8 @@ function historyContext(
 // ---------------------------------------------------------------------------
 
 /**
- * One tool, four actions, registered only while multi-agent mode is on. Fresh installs enable
+ * One composite tool for transient ChatGPT workers and durable goals, registered only while
+ * multi-agent mode is on. Fresh installs enable
  * it; existing configs keep their stored choice, so a user who has it off never sees this schema.
  *
  * The identity model is the whole design, and it is the same one for every role: an agent *is*
@@ -1076,14 +1090,29 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
     {
       title: 'Multi-agent run',
       description:
-        'Run ChatGPT worker agents on this machine. ' +
+        'Coordinate ChatGPT workers and durable multi-provider goals on this machine. ' +
         'spawn — create workers; the calling chat becomes the run\'s prime and each worker opens in its own ChatGPT conversation with its brief in it. A worker sees only what you send: shared instructions go in "context" once, each job in its own "task". ' +
         'message — the prime may message any worker, a worker only "prime"; send several at once in "messages". Replies arrive on later tool results, so never wait or poll. ' +
         'status — every agent, its task, and what is waiting. ' +
         'finish — workers only, terminal. ' +
+        'goal_create/goal_add_tasks/goal_status — maintain a persistent objective and its acceptance-tested tasks. ' +
+        'goal_assign — run one queued task in ChatGPT, Claude Code, or Hermes Agent; external providers require command permission and an approved workdir. ' +
+        'task_cancel — stop one running goal task. ' +
         'An agent is the conversation it runs in, so no call here carries a key.',
       inputSchema: z.object({
-        action: z.enum(['spawn', 'message', 'status', 'finish']).describe('What to do.'),
+        action: z
+          .enum([
+            'spawn',
+            'message',
+            'status',
+            'finish',
+            'goal_create',
+            'goal_add_tasks',
+            'goal_assign',
+            'goal_status',
+            'task_cancel'
+          ])
+          .describe('What to do.'),
         context: z
           .string()
           .max(4000)
@@ -1139,7 +1168,34 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
             'finish: your handoff to the prime, all it ever sees of your work. Four headings, in order, factual: ' +
               'RESULT (what you found or did), CHANGES (each file created/edited/deleted, one per line, or None), ' +
               'VALIDATION (what you ran and what it said, or None), BLOCKERS (or None).'
+          ),
+        title: z.string().min(1).max(120).optional().describe('goal_create: short goal title.'),
+        objective: z.string().min(1).max(8000).optional().describe('goal_create: complete objective and constraints.'),
+        tasks: z
+          .array(
+            z.object({
+              title: z.string().min(1).max(120),
+              acceptance: z.string().min(1).max(4000)
+            })
           )
+          .min(1)
+          .max(32)
+          .optional()
+          .describe('goal_create/goal_add_tasks: task titles and their measurable acceptance criteria.'),
+        goal_id: z.string().min(10).max(80).optional().describe('Goal action: durable goal id.'),
+        task_id: z.string().min(10).max(80).optional().describe('goal_assign/task_cancel: durable task id.'),
+        provider: z
+          .enum(['chatgpt', 'claude-code', 'hermes'])
+          .optional()
+          .describe('goal_assign: worker provider.'),
+        workdir: pathArg.optional().describe('goal_assign for Claude/Hermes: approved working directory.'),
+        max_turns: z.number().int().min(1).max(100).optional().describe('goal_assign for Claude Code: turn ceiling.'),
+        max_budget_usd: z
+          .number()
+          .min(0.01)
+          .max(1000)
+          .optional()
+          .describe('goal_assign for Claude Code: spend ceiling in US dollars.')
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },
@@ -1152,6 +1208,214 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
       const startedAt = currentCall()?.startedAt ?? Date.now();
       return guard('agents', async () => {
         if (!reg.agentToolsLive) return reg.featureDisabled('Multi-agent mode', 'Multi-agent mode (experimental)');
+
+        const goalCaller = async (): Promise<Caller> => {
+          const caller = await callerNow(startedAt, { exact: true });
+          if (!caller.conversationId) {
+            throw new Error(
+              'GOAL_IDENTITY_REQUIRED: this goal action needs exact browser evidence for the calling conversation.'
+            );
+          }
+          return caller;
+        };
+
+        if (input.action === 'goal_create') {
+          if (!input.title || !input.objective) return fail('agents action=goal_create requires title and objective.');
+          const caller = await goalCaller();
+          const goal = createGoal(
+            { title: input.title, objective: input.objective, tasks: input.tasks ?? [] },
+            { ownerConversationId: caller.conversationId }
+          );
+          if (!(await persistCriticalGoalsNow())) {
+            throw new Error('The goal could not cross its durable acceptance barrier. Retry this same request.');
+          }
+          noteCount(goal.tasks.length);
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Created goal ${goal.id}: ${goal.title}. It has ${goal.tasks.length} queued task(s).`
+              }
+            ],
+            structuredContent: { action: 'goal_create', goal }
+          };
+        }
+
+        if (input.action === 'goal_add_tasks') {
+          if (!input.goal_id || !input.tasks) {
+            return fail('agents action=goal_add_tasks requires goal_id and tasks.');
+          }
+          const caller = await goalCaller();
+          assertGoalOwner(input.goal_id, caller.conversationId);
+          const goal = addGoalTasks(input.goal_id, input.tasks);
+          if (!(await persistCriticalGoalsNow())) {
+            throw new Error('The new goal tasks could not cross their durable acceptance barrier.');
+          }
+          noteCount(goal.tasks.length);
+          return {
+            content: [
+              { type: 'text' as const, text: `Added ${input.tasks.length} task(s) to ${goal.id}; ${goal.tasks.length} total.` }
+            ],
+            structuredContent: { action: 'goal_add_tasks', goal }
+          };
+        }
+
+        if (input.action === 'goal_status') {
+          if (!input.goal_id) return fail('agents action=goal_status requires goal_id.');
+          const caller = await goalCaller();
+          assertGoalOwner(input.goal_id, caller.conversationId);
+          // Reconciliation is read-triggered and bounded by this goal's 32-task ceiling.
+          // It never starts work: it only turns provider processes that already ended into
+          // their durable terminal result.
+          for (const task of goalState(input.goal_id).goals[0]!.tasks) {
+            if (task.status === 'running' && (task.provider === 'claude-code' || task.provider === 'hermes')) {
+              await refreshAgentTask(input.goal_id, task.id);
+            }
+          }
+          const goal = goalState(input.goal_id).goals[0]!;
+          if (!(await persistCriticalGoalsNow())) {
+            throw new Error('Goal reconciliation could not be made durable yet.');
+          }
+          const done = goal.tasks.filter((task) => task.status === 'completed').length;
+          noteCount(goal.tasks.length);
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `${goal.id} is ${goal.status}: ${done}/${goal.tasks.length} task(s) completed.`
+              }
+            ],
+            structuredContent: { action: 'goal_status', goal }
+          };
+        }
+
+        if (input.action === 'goal_assign') {
+          if (!input.goal_id || !input.task_id || !input.provider) {
+            return fail('agents action=goal_assign requires goal_id, task_id and provider.');
+          }
+          const caller = await goalCaller();
+          assertGoalOwner(input.goal_id, caller.conversationId);
+          const goal = goalState(input.goal_id).goals[0]!;
+          const task = goal.tasks.find((candidate) => candidate.id === input.task_id);
+          if (!task) return fail(`Unknown task id: ${input.task_id}`);
+          if (task.status !== 'queued') return fail(`Task ${task.id} is not queued (state ${task.status}).`);
+
+          if (input.provider === 'chatgpt') {
+            if (input.max_turns !== undefined || input.max_budget_usd !== undefined || input.workdir !== undefined) {
+              return fail('ChatGPT goal tasks do not take workdir, max_turns or max_budget_usd.');
+            }
+            const { created, runId } = spawn(
+              {
+                caller,
+                context: `Goal: ${goal.title}\nObjective: ${goal.objective}`,
+                workers: [{ label: task.title, task: `${task.title}\n\nAcceptance: ${task.acceptance}` }]
+              },
+              { deferDelivery: true }
+            );
+            const worker = created[0]!;
+            try {
+              assignGoalTask(input.goal_id, input.task_id, { provider: 'chatgpt', runId: worker.id });
+            } catch (error) {
+              clearAgent(worker.id);
+              throw error;
+            }
+            if (!(await persistCriticalGoalsNow())) {
+              clearAgent(worker.id);
+              cancelGoalTask(input.goal_id, input.task_id);
+              throw new Error('The goal assignment could not cross its durable acceptance barrier.');
+            }
+            if (!(await persistCriticalSwarmNow())) {
+              clearAgent(worker.id);
+              cancelGoalTask(input.goal_id, input.task_id);
+              await persistCriticalGoalsNow();
+              throw new Error('The ChatGPT worker could not cross its durable acceptance barrier.');
+            }
+            requestWorkerBootstraps([worker.id]);
+            await adoptAgent(PRIME_ID);
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: `Assigned ${task.id} to ${worker.id} in ChatGPT run ${runId}. Its conversation is opening now.`
+                }
+              ],
+              structuredContent: {
+                action: 'goal_assign',
+                goal_id: input.goal_id,
+                task_id: task.id,
+                provider: 'chatgpt',
+                worker_id: worker.id,
+                run_id: runId
+              }
+            };
+          }
+
+          if (reg.ctx.readOnly || !reg.caps.command) {
+            return fail(
+              'TOOL_DISABLED: external agent tasks require command permission and read-only mode to be off in Chat On Steroids.'
+            );
+          }
+          const cwd = await resolveCwd(reg.ctx, input.workdir);
+          const assigned = await startAgentTask({
+            goalId: input.goal_id,
+            taskId: input.task_id,
+            provider: input.provider,
+            workspace: { real: cwd.real, virtual: cwd.virtual },
+            ...(input.max_turns === undefined ? {} : { maxTurns: input.max_turns }),
+            ...(input.max_budget_usd === undefined ? {} : { maxBudgetUsd: input.max_budget_usd })
+          });
+          if (!(await persistCriticalGoalsNow())) {
+            await cancelAgentTask(input.goal_id, input.task_id).catch(() => undefined);
+            throw new Error('The external goal assignment could not cross its durable acceptance barrier.');
+          }
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Assigned ${assigned.id} to ${input.provider}. It is running as ${assigned.runId}; use goal_status later.`
+              }
+            ],
+            structuredContent: {
+              action: 'goal_assign',
+              goal_id: input.goal_id,
+              task_id: assigned.id,
+              provider: assigned.provider,
+              state: assigned.status,
+              run_id: assigned.runId
+            }
+          };
+        }
+
+        if (input.action === 'task_cancel') {
+          if (!input.goal_id || !input.task_id) return fail('agents action=task_cancel requires goal_id and task_id.');
+          const caller = await goalCaller();
+          assertGoalOwner(input.goal_id, caller.conversationId);
+          const task = goalState(input.goal_id).goals[0]!.tasks.find((candidate) => candidate.id === input.task_id);
+          if (!task) return fail(`Unknown task id: ${input.task_id}`);
+          if (task.status !== 'running' || !task.provider || !task.runId) {
+            return fail(`Task ${task.id} is not running.`);
+          }
+          let cancelled;
+          if (task.provider === 'chatgpt') {
+            const cleared = clearAgent(task.runId);
+            if (cleared.cleared !== 'worker') return fail(`ChatGPT worker ${task.runId} is no longer active.`);
+            cancelled = cancelGoalTask(input.goal_id, input.task_id);
+          } else {
+            if (reg.ctx.readOnly || !reg.caps.command) {
+              return fail(
+                'TOOL_DISABLED: cancelling an external agent task requires command permission and read-only mode to be off.'
+              );
+            }
+            cancelled = await cancelAgentTask(input.goal_id, input.task_id);
+          }
+          if (!(await persistCriticalGoalsNow())) {
+            throw new Error('Task cancellation could not be made durable yet.');
+          }
+          return {
+            content: [{ type: 'text' as const, text: `Cancelled ${cancelled.id}.` }],
+            structuredContent: { action: 'task_cancel', goal_id: input.goal_id, task: cancelled }
+          };
+        }
 
         if (input.action === 'spawn') {
           if (!input.workers) return fail('agents action=spawn requires workers.');
@@ -1241,6 +1505,13 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
           const { info, report, repeat } = finishAgent(await callerNow(startedAt), input.result);
           if (!(await persistCriticalSwarmNow())) {
             throw new Error('The worker finish could not be made durable yet. Retry the same finish result.');
+          }
+          const linkedTask = runningGoalTaskForProviderRun('chatgpt', info.id);
+          if (linkedTask && !repeat) {
+            completeGoalTask(linkedTask.goalId, linkedTask.task.id, input.result);
+            if (!(await persistCriticalGoalsNow())) {
+              throw new Error('The linked goal task result could not be made durable yet. Retry the same finish result.');
+            }
           }
           if (report) await recordAgentMessage(report, 'sent');
           // A retry is answered as a retry. Repeating "marked finished" would read as a

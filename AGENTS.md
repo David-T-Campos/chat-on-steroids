@@ -222,6 +222,9 @@ src/shared/types.ts           config/app/IPC types and Capabilities
 ── browser ────────────────────────────────────────────────────────────────
 src/main/bridge.ts            extension HTTP bridge + compaction/worker orchestration
 src/main/agents.ts            the one global star-topology multi-agent broker
+src/main/goals.ts             durable goal/task ledger and exact conversation ownership
+src/main/agent-providers.ts   fixed shell-free Claude Code and Hermes argv/result adapters
+src/main/agent-runner.ts      owned external-provider process lifecycle
 src/main/agent-secrets.ts     exceptional agent recovery-key handling
 extension/chatgpt-dom.js      EVERY ChatGPT selector and DOM-shape assumption
 extension/content.js          page recorder, turn lifecycle, Overwrite, compact UI
@@ -589,9 +592,22 @@ the model received it. Never delete a message merely because it was offered.
 releases only when worker state and final-report delivery make it safe. Orphan cleanup uses
 durable quiescence plus the wider in-flight MCP/observation counters — not a heartbeat
 guess. Compact & Resume may move the prime conversation while preserving the run; session,
-workspace and prime binding move together or not at all.
+workspace, prime binding and goal ownership move together or not at all.
 
-**Tests.** `agents.test.ts`, `swarm.test.ts`.
+**Durable goals.** The same `agents` schema owns `goal_create`, `goal_add_tasks`,
+`goal_assign`, `goal_status` and `task_cancel`; do not add another Core schema for this.
+Goals are bound to the exact creating conversation, and the owner conversation id is never
+included in public goal state. Every accepted mutation crosses the immediate `goals-state`
+durability barrier before an MCP success result is published.
+
+**External providers.** Claude Code and Hermes are fixed provider adapters, never arbitrary
+executables or shell fragments. They may start only with multi-agent enabled, command
+permission live, read-only off and an approved workdir. The CLIs own their authentication;
+no provider key/token may cross MCP, IPC, bridge or extension state. Every child is owned by
+one task, has a cancel route and is stopped by the application shutdown phase.
+
+**Tests.** `agents.test.ts`, `swarm.test.ts`, `goals.test.ts`, `agent-providers.test.ts`,
+`agent-runner.test.ts`.
 
 ## 17. Renderer, IPC, connection and desktop
 

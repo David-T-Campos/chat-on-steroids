@@ -57,6 +57,7 @@ const { createSession, getSession, initSessionStore, resetSessionStoreForTests, 
 const store = await import('../src/main/session/store.js');
 const { resetRecorderForTests, sessionForConversation } = await import('../src/main/session/recorder.js');
 const { resetWorkspaces, setWorkspaceFor, workspaceEntries } = await import('../src/main/workspace.js');
+const { assertGoalOwner, createGoal, resetGoalsForTests } = await import('../src/main/goals.js');
 const { makeTempDir, removeTempDir, SAMPLE_BRIEF } = await import('./helpers.js');
 
 let dir: string;
@@ -94,6 +95,7 @@ beforeEach(async () => {
   resetAgentsForTests();
   resetRecorderForTests();
   resetWorkspaces();
+  resetGoalsForTests();
   await resetSessionStoreForTests();
 });
 
@@ -408,10 +410,16 @@ describe('the swarm handover', () => {
   it('commits a session that owns no swarm at all', async () => {
     const { sessionId, token } = await readyContinuation();
     claimContinuation(token, 'tab-1');
+    const goal = createGoal(
+      { title: 'Continue after compaction', objective: 'Keep durable goal control' },
+      { ownerConversationId: CHAT_A }
+    );
 
     expect(freezePrimeTransfer(CHAT_A)).toBe('absent');
     expect(await commitContinuation(token, CHAT_B)).toBe(true);
     expect(await attachedChat(sessionId)).toBe(CHAT_B);
+    expect(() => assertGoalOwner(goal.id, CHAT_A)).toThrow(/access/i);
+    expect(() => assertGoalOwner(goal.id, CHAT_B)).not.toThrow();
   });
 
   it('keeps the run alive while chat A is being replaced, and kills it otherwise', async () => {

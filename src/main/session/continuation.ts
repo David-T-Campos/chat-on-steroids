@@ -61,6 +61,7 @@ import {
   thawPrimeTransfer
 } from '../agents.js';
 import { moveChatWorkspace } from '../workspace.js';
+import { transferGoalOwnership } from '../goals.js';
 import { writeDurableNow, writeDurableSoon } from '../durable.js';
 import { createHandoff } from './handoff.js';
 import { rebindConversation } from './recorder.js';
@@ -571,6 +572,7 @@ function publishCommittedProjection(
 ): void {
   rebindConversation(entry.sessionId, entry.from, toConversationId);
   moveChatWorkspace(entry.from, toConversationId);
+  transferGoalOwnership(entry.from, toConversationId);
   if (swarm === 'frozen') {
     if (!commitPrimeTransfer(entry.from, toConversationId)) {
       // The frozen handover cannot expire. A miss here means the run ended outright while
@@ -894,6 +896,7 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
       if (session && entry.to && session.conversationId === entry.to) {
         rebindConversation(entry.sessionId, entry.from, entry.to);
         moveChatWorkspace(entry.from, entry.to);
+        transferGoalOwnership(entry.from, entry.to);
         const repaired = recoveryHooks.repairPrimeTransfer?.(entry.from, entry.to) ?? false;
         if (!repaired) commitPrimeTransfer(entry.from, entry.to);
         entry.state = 'committed';

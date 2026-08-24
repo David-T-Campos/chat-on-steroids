@@ -142,9 +142,11 @@ For long recorded sessions, the app estimates context pressure locally. Fresh in
 
 Compact & Resume asks the current chat to write a handoff, stores it locally, opens a fresh ChatGPT conversation and rebinds the **same local session** to it. The original session remains intact if the handoff cannot be completed.
 
-### Multi-agent mode (experimental)
+### Multi-agent goals (experimental)
 
 Fresh installs currently enable multi-agent mode with **two workers** by default; the hard maximum is eight. One prime chat can open worker chats and exchange brokered messages with them. Workers cannot message each other directly.
+
+The same single `agents` tool now keeps durable goals with explicit task acceptance criteria. A goal task can run in a separate ChatGPT conversation or through a locally installed **Claude Code** or **Hermes Agent** CLI. External agent processes are owned and cancellable, run only inside an approved folder, require the app's command permission, and are stopped when the app quits. Chat On Steroids never stores their API keys or login tokens; authenticate each CLI using its own official setup flow.
 
 This is experimental browser automation, and parallel chats can edit the same files or spend account limits quickly. Use it only on work you can recover, keep worker ownership explicit, and turn the feature off when you do not want ChatGPT tabs opened or coordinated automatically. The terms note in [Experimental browser augmentation and OpenAI terms](#experimental-browser-augmentation-and-openai-terms) applies here.
 

@@ -3348,6 +3348,15 @@ describe('tool summaries', () => {
     );
     expect(summarize('agents', { action: 'message', to: 'worker-2' }).title).toBe('Messaged worker-2');
     expect(summarize('agents', { action: 'status' }).title).toBe('Checked agent status');
+    expect(summarize('agents', { action: 'goal_create', title: 'Release mission' }).title).toBe(
+      'Created goal Release mission'
+    );
+    expect(summarize('agents', { action: 'goal_add_tasks', tasks: [{}, {}] }).title).toBe('Added 2 goal tasks');
+    expect(summarize('agents', { action: 'goal_assign', provider: 'claude-code' }).title).toBe(
+      'Assigned task to Claude Code'
+    );
+    expect(summarize('agents', { action: 'goal_status' }).title).toBe('Checked goal status');
+    expect(summarize('agents', { action: 'task_cancel' }).title).toBe('Cancelled goal task');
     expect(summarize('session', { action: 'history', query: 'tunnel' }).title).toBe(
       'Searched session history "tunnel"'
     );
