@@ -41,10 +41,13 @@ import {
   setContinuationRecoveryHooks,
   type ContinuationSnapshot
 } from './session/continuation.js';
+import { onGoalsPersist, restoreGoals, snapshotGoals, type GoalsSnapshot } from './goals.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
 const RETIRED_WORKERS_STATE = 'retired-workers';
+/** Durable orchestration ledger. Contains bounded task summaries, never provider credentials. */
+const GOALS_STATE = 'goals-state';
 
 let window: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -217,6 +220,8 @@ void app.whenReady().then(async () => {
   // acceptance barrier even when this launch began with multi-agent disabled.
   onSwarmPersist(() => writeDurableSoon(SWARM_STATE, snapshotSwarm()));
   onSwarmPersistNow((snapshot) => writeDurableNow(SWARM_STATE, snapshot));
+  onGoalsPersist(() => writeDurableSoon(GOALS_STATE, snapshotGoals()));
+  restoreGoals(await readDurable<GoalsSnapshot>(GOALS_STATE));
 
   // A multi-agent run outlives this process. Restoring it before the bridge starts
   // means a worker that never joined gets its chat re-requested through the same queue
