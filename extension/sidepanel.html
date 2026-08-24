@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mission Control</title>
+    <link rel="icon" href="icons/icon48.png" />
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <img src="icons/icon48.png" width="34" height="34" alt="" />
+      <div>
+        <p class="eyebrow">Chat On Steroids</p>
+        <h1>Mission Control</h1>
+      </div>
+      <span class="connection" id="connection"><i></i><span>Checking</span></span>
+    </header>
+
+    <main>
+      <section class="overview" aria-labelledby="overviewTitle">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Live orchestration</p>
+            <h2 id="overviewTitle">Agent workload</h2>
+          </div>
+          <button class="icon-button" id="refreshGoals" type="button" aria-label="Refresh goals">↻</button>
+        </div>
+        <div class="signals" aria-label="Goal and task totals">
+          <div><strong id="activeCount">—</strong><span>Active</span></div>
+          <div><strong id="runningCount">—</strong><span>Running</span></div>
+          <div><strong id="queuedCount">—</strong><span>Queued</span></div>
+          <div><strong id="doneCount">—</strong><span>Done</span></div>
+        </div>
+        <p id="goalState" role="status" aria-live="polite">Connecting to the desktop app…</p>
+      </section>
+
+      <section class="mission-list" id="goalList" aria-label="Goals"></section>
+    </main>
+
+    <footer>
+      <button class="sync" id="browserSync" type="button">
+        <span>Sync browser activity</span>
+        <small id="syncState">Flush observations and refresh ChatGPT tabs</small>
+      </button>
+      <p>This panel is a read-only mirror. Start or cancel local agents in the desktop app.</p>
+    </footer>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

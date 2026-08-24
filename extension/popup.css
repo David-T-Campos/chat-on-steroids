@@ -217,6 +217,49 @@ h1 b {
   background: linear-gradient(145deg, var(--card), color-mix(in srgb, var(--card) 88%, var(--green)));
 }
 
+.goal-panel-action {
+  width: 100%;
+  min-height: 52px;
+  margin: 0 0 15px;
+  padding: 10px 13px;
+  border: 1px solid color-mix(in srgb, var(--green) 42%, var(--edge));
+  border-radius: 13px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--green) 12%, var(--card)), var(--card));
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.goal-panel-action span,
+.goal-panel-action small {
+  display: block;
+}
+
+.goal-panel-action span {
+  font-weight: 700;
+}
+
+.goal-panel-action small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.goal-panel-action:hover {
+  border-color: var(--green);
+  transform: translateY(-1px);
+}
+
+.goal-panel-action:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.goal-panel-action:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .ops-card::before {
   content: '';
   position: absolute;

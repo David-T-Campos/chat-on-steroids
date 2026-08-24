@@ -148,6 +148,41 @@ describe('extension release metadata', () => {
     expect(syncHandler.indexOf('drainCommandAcks()')).toBeLessThan(syncHandler.indexOf('drain()'));
     expect(syncHandler.indexOf('drain()')).toBeLessThan(syncHandler.indexOf('drainCloses()'));
   });
+
+  it('ships a read-only Mission Control side panel without local execution or credential surfaces', async () => {
+    const dir = path.join(process.cwd(), 'extension');
+    const manifest = JSON.parse(await fs.readFile(path.join(dir, 'manifest.json'), 'utf8')) as {
+      permissions: string[];
+      side_panel?: { default_path?: string };
+    };
+    const [html, js, css, popupHtml, popupJs] = await Promise.all([
+      fs.readFile(path.join(dir, 'sidepanel.html'), 'utf8'),
+      fs.readFile(path.join(dir, 'sidepanel.js'), 'utf8'),
+      fs.readFile(path.join(dir, 'sidepanel.css'), 'utf8'),
+      fs.readFile(path.join(dir, 'popup.html'), 'utf8'),
+      fs.readFile(path.join(dir, 'popup.js'), 'utf8')
+    ]);
+
+    expect(manifest.permissions).toContain('sidePanel');
+    expect(manifest.side_panel?.default_path).toBe('sidepanel.html');
+    expect(html).toContain('id="goalList"');
+    expect(html).toContain('id="goalState" role="status" aria-live="polite"');
+    expect(html).toContain('id="browserSync"');
+    expect(css.length).toBeGreaterThan(500);
+    expect(popupHtml).toContain('id="goalPanelBtn"');
+    expect(popupJs).toContain("type: 'openMissionControl'");
+    expect(popupJs).toContain('chrome.sidePanel.open');
+    expect(backgroundSource).toContain('async goalSummary()');
+    expect(backgroundSource).toContain('async openMissionControl()');
+
+    // Side-panel code can ask the trusted worker for projections and browser sync only.
+    expect(js).toContain("type: 'goalSummary'");
+    expect(js).toContain("type: 'syncNow'");
+    expect(js).not.toMatch(/\bfetch\s*\(/);
+    expect(js).not.toMatch(/chrome\.storage|authorization|bearer|token|api.?key|secret/i);
+    expect(js).not.toMatch(/exec|command|spawn|startGoal|startAgent|claude\s+-p|hermes\s+chat/i);
+    expect(js).not.toContain('innerHTML');
+  });
 });
 
 // ---------------------------------------------------------------------- DOM
@@ -1712,6 +1747,74 @@ describe('extension connection', () => {
       pendingCloses: 0
     });
     expect(JSON.stringify(status)).not.toContain('secret');
+  });
+
+  it('normalizes goal summaries a second time before they reach extension UI', async () => {
+    const fetch = vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/goals/summary') {
+        return response(200, {
+          ok: true,
+          totals: { goals: 1, active: 1, running: 1, queued: 0, completed: 0, failed: 0, cancelled: 0 },
+          truncated: false,
+          goals: [
+            {
+              id: 'goal_11111111-1111-4111-8111-111111111111',
+              title: 'Release mission',
+              status: 'active',
+              updatedAt: 123,
+              objective: 'must not cross',
+              tasks: [
+                {
+                  id: 'task_22222222-2222-4222-8222-222222222222',
+                  title: 'Audit bridge',
+                  status: 'running',
+                  provider: 'claude-code',
+                  updatedAt: 124,
+                  result: 'private result',
+                  runId: 'private run'
+                }
+              ],
+              counts: { running: 1, queued: 0, completed: 0, failed: 0, cancelled: 0 },
+              secret: 'must not cross'
+            }
+          ]
+        });
+      }
+      return response(404, {});
+    });
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea(),
+      fetch
+    });
+
+    const summary = await worker.send({ type: 'goalSummary' });
+    expect(summary).toEqual({
+      ok: true,
+      totals: { goals: 1, active: 1, running: 1, queued: 0, completed: 0, failed: 0, cancelled: 0 },
+      truncated: false,
+      goals: [
+        {
+          id: 'goal_11111111-1111-4111-8111-111111111111',
+          title: 'Release mission',
+          status: 'active',
+          updatedAt: 123,
+          counts: { running: 1, queued: 0, completed: 0, failed: 0, cancelled: 0 },
+          tasks: [
+            {
+              id: 'task_22222222-2222-4222-8222-222222222222',
+              title: 'Audit bridge',
+              status: 'running',
+              provider: 'claude-code',
+              updatedAt: 124
+            }
+          ]
+        }
+      ]
+    });
+    expect(JSON.stringify(summary)).not.toMatch(/secret|objective|result|runId|private/i);
   });
 
   it('syncs durable browser work in order and refreshes known and discovered ChatGPT tabs', async () => {

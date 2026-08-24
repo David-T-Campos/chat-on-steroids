@@ -134,6 +134,12 @@ can keep observation available while disabling state-changing desktop actions.
 - `power` shares the command permission and privilege boundary: its conveniences are not a new
   elevation path, and approved filesystem roots do not contain them.
 
+The Chrome companion is not a third MCP surface. Its authenticated `/goals/summary` bridge route
+is a capped, read-only projection containing goal/task ids, titles, states, providers, counts and
+timestamps only. Objective and acceptance text, results/errors, provider run ids, conversation
+ownership, native paths and credentials stay in Electron. The service worker applies the same
+allowlist again before the side panel receives the projection.
+
 ## Compatibility notes
 
 Older conversations can retain a cached MCP schema after an upgrade. Refresh/review the app in

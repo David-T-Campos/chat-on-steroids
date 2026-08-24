@@ -497,6 +497,7 @@ Three execution contexts with **three different lifetimes**:
 | `content.js` | isolated, document | observation, turn lifecycle, Overwrite, compact UI |
 | `fiber.js` | **MAIN**, document | React/Fiber evidence the DOM does not reveal |
 | `background.js` | MV3 worker, **suspends freely** | bridge token, journal, tab↔conversation registry |
+| `sidepanel.*` | extension page, panel lifetime | read-only bounded goal/task projection |
 
 Plus `chrome.storage.session` — survives worker sleep, dies with the browser session — and
 tab↔conversation binding, which follows tab lifetime and explicit navigation.
@@ -530,7 +531,7 @@ MAIN-world Fiber helper.
 
 A second loopback HTTP service on the first free port of **8765–8769**. The extension finds
 it with `/hello`, silently provisions a bearer token with `/pair`, then uses authenticated
-routes: `/status`, `/events`, `/closed`, `/activity`, `/compact/claim-auto`, `/compact`,
+routes: `/status`, `/goals/summary`, `/events`, `/closed`, `/activity`, `/compact/claim-auto`, `/compact`,
 `/commands/redeem`, `/commands/ack`.
 
 **Must hold.** The token never enters the ChatGPT page — the service worker holds it in
@@ -538,6 +539,12 @@ extension-owned state and the app keeps its counterpart out of config and log su
 bridge exposes **no** filesystem, command, or config-mutation route. Protocol mismatch
 against `BRIDGE_PROTOCOL` warns once rather than spamming. Concurrent startup must not race
 on listener ownership.
+
+`/goals/summary` is the sole orchestration view exposed to Chrome. It is read-only and capped,
+omits objectives, acceptance criteria, result/error bodies, provider run ids, conversation
+ownership, native paths and credentials, and is allowlisted again in `background.js`. The side
+panel may refresh this projection or flush the existing browser queues; it never starts or stops
+a local provider.
 
 Because this is where browser-observed lifecycle meets recorder, agents, continuation and
 workspace state, a `bridge.ts` bug presents as a session, extension, or agent bug depending

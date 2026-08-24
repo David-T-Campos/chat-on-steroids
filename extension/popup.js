@@ -427,6 +427,30 @@ $('syncBtn').addEventListener('click', async () => {
   await refresh();
 });
 
+$('goalPanelBtn').addEventListener('click', async () => {
+  const button = $('goalPanelBtn');
+  button.disabled = true;
+  try {
+    let result;
+    try {
+      // Keep the user activation in this extension page; Chrome requires one when a
+      // side panel is opened programmatically. The worker path is a compatibility fallback.
+      const current = await chrome.windows.getCurrent();
+      await chrome.sidePanel.open({ windowId: current.id });
+      result = { ok: true };
+    } catch {
+      result = await chrome.runtime.sendMessage({ type: 'openMissionControl' });
+    }
+    if (!result || result.ok !== true) {
+      button.querySelector('small').textContent = 'Could not open the side panel';
+    }
+  } catch {
+    button.querySelector('small').textContent = 'Could not open the side panel';
+  } finally {
+    button.disabled = false;
+  }
+});
+
 $('retryBtn').addEventListener('click', async () => {
   $('retryBtn').disabled = true;
   await chrome.runtime.sendMessage({ type: 'pair' });

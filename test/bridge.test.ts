@@ -69,6 +69,7 @@ const {
   '../src/main/agents.js'
 );
 const { makeTempDir, removeTempDir, SAMPLE_BRIEF } = await import('./helpers.js');
+const { assignGoalTask, createGoal, resetGoalsForTests } = await import('../src/main/goals.js');
 
 const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop';
 /** The chat that spawns the swarm in these tests: only a proven conversation can. */
@@ -245,10 +246,60 @@ beforeEach(async () => {
     opened.push(url);
   });
   resetRecorderForTests();
+  resetGoalsForTests();
   writeDurableSoon('bridge-commands', null);
   await flushDurable();
   await setSecret('bridgeToken', '');
   token = null;
+});
+
+describe('goal summary boundary', () => {
+  it('requires authentication and returns only a bounded, redacted projection', async () => {
+    const goal = createGoal({
+      title: 'Ship Mission Control',
+      objective: 'Never expose C:\\private\\repo or objective-secret-123',
+      tasks: [
+        {
+          title: 'Audit the browser bridge',
+          acceptance: 'Keep provider-token-456 and native paths out of Chrome'
+        }
+      ]
+    });
+    assignGoalTask(goal.id, goal.tasks[0]!.id, { provider: 'hermes', runId: 'run-safe-label' });
+
+    const unauthorised = await request('GET', '/goals/summary', { auth: null });
+    expect(unauthorised.status).toBe(401);
+
+    await pair();
+    const reply = await request('GET', '/goals/summary');
+    expect(reply.status).toBe(200);
+    expect(reply.body).toEqual({
+      ok: true,
+      totals: { goals: 1, active: 1, running: 1, queued: 0, completed: 0, failed: 0, cancelled: 0 },
+      truncated: false,
+      goals: [
+        {
+          id: goal.id,
+          title: 'Ship Mission Control',
+          status: 'active',
+          updatedAt: expect.any(Number),
+          counts: { running: 1, queued: 0, completed: 0, failed: 0, cancelled: 0 },
+          tasks: [
+            {
+              id: goal.tasks[0]!.id,
+              title: 'Audit the browser bridge',
+              status: 'running',
+              provider: 'hermes',
+              updatedAt: expect.any(Number)
+            }
+          ]
+        }
+      ]
+    });
+    const serialised = JSON.stringify(reply.body);
+    expect(serialised).not.toMatch(/objective-secret|provider-token|C:\\\\private|acceptance|result|error|runId/i);
+    expect(Buffer.byteLength(serialised)).toBeLessThan(128 * 1024);
+  });
 });
 
 // ------------------------------------------------------------------ origin

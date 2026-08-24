@@ -82,6 +82,7 @@ import {
 import { readDurable, writeDurableNow, writeDurableSoon } from './durable.js';
 import { APP_VERSION, BRIDGE_PROTOCOL } from './version.js';
 import { requestCorrelation } from './session/correlation.js';
+import { goalState } from './goals.js';
 
 /** Fixed candidates so the extension can find the app without being told a port. */
 export const DEFAULT_PORTS = [8765, 8766, 8767, 8768, 8769];
@@ -109,6 +110,9 @@ const STALE_SWARM_SWEEP_MS = 30_000;
 let observationWritesInFlight = 0;
 /** Requests allowed per rolling minute, across all routes. */
 const RATE_LIMIT = 900;
+/** A browser projection stays useful without turning the bridge into a transcript export. */
+const GOAL_SUMMARY_MAX_GOALS = 20;
+const GOAL_SUMMARY_MAX_TASKS = 64;
 
 /**
  * How long the app waits for the tab it opened to do the job, before failing it.
@@ -624,6 +628,62 @@ function chatIsWorking(conversationId: string): boolean {
   return Boolean(current && (current.generating || current.activeTurnId));
 }
 
+/**
+ * Strict browser-safe projection of the durable ledger.
+ *
+ * Objective, acceptance criteria, result/error text, provider run ids and ownership stay
+ * in the desktop process. Fixed item limits plus the ledger's title limits keep the JSON
+ * well below the bridge's 128 KiB response budget by construction.
+ */
+function browserGoalSummary(): Record<string, unknown> {
+  const all = goalState().goals;
+  const taskStatuses = ['running', 'queued', 'completed', 'failed', 'cancelled'] as const;
+  const totals = {
+    goals: all.length,
+    active: all.filter((goal) => goal.status === 'active').length,
+    running: 0,
+    queued: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0
+  };
+  for (const goal of all) {
+    for (const task of goal.tasks) totals[task.status] += 1;
+  }
+
+  const selected = [...all]
+    .sort((left, right) => Number(right.status === 'active') - Number(left.status === 'active') || right.updatedAt - left.updatedAt)
+    .slice(0, GOAL_SUMMARY_MAX_GOALS);
+  let taskBudget = GOAL_SUMMARY_MAX_TASKS;
+  let truncated = selected.length < all.length;
+  const goals = selected.map((goal) => {
+    const counts = { running: 0, queued: 0, completed: 0, failed: 0, cancelled: 0 };
+    for (const task of goal.tasks) counts[task.status] += 1;
+    const ordered = [...goal.tasks].sort(
+      (left, right) =>
+        taskStatuses.indexOf(left.status) - taskStatuses.indexOf(right.status) || right.updatedAt - left.updatedAt
+    );
+    const visible = ordered.slice(0, taskBudget);
+    taskBudget -= visible.length;
+    if (visible.length < ordered.length) truncated = true;
+    return {
+      id: goal.id,
+      title: goal.title,
+      status: goal.status,
+      updatedAt: goal.updatedAt,
+      counts,
+      tasks: visible.map((task) => ({
+        id: task.id,
+        title: task.title,
+        status: task.status,
+        provider: task.provider,
+        updatedAt: task.updatedAt
+      }))
+    };
+  });
+  return { ok: true, totals, truncated, goals };
+}
+
 async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const { ok: originAllowed, origin } = originOf(req);
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -708,6 +768,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
   if (route === '/status') {
     const live = liveConversations();
     return json(res, 200, { ok: true, conversations: live, commands: commands.length }, origin);
+  }
+
+  if (route === '/goals/summary' && req.method === 'GET') {
+    return json(res, 200, browserGoalSummary(), origin);
   }
 
   if (route === '/correlations' && req.method === 'POST') {

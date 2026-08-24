@@ -1408,6 +1408,81 @@ async function operationsStatus() {
   return { ok: true, conversations, commands, ...local() };
 }
 
+const GOAL_STATES = new Set(['active', 'completed', 'cancelled']);
+const TASK_STATES = new Set(['queued', 'running', 'completed', 'failed', 'cancelled']);
+const AGENT_NAMES = new Set(['chatgpt', 'claude-code', 'hermes']);
+
+function safeText(value, max) {
+  return typeof value === 'string' ? value.slice(0, max) : '';
+}
+
+function safeCount(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? Math.min(number, 10_000) : 0;
+}
+
+function safeTime(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+}
+
+function safeTaskCounts(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  return {
+    running: safeCount(source.running),
+    queued: safeCount(source.queued),
+    completed: safeCount(source.completed),
+    failed: safeCount(source.failed),
+    cancelled: safeCount(source.cancelled)
+  };
+}
+
+/** Re-allowlists the app projection so a future bridge field cannot drift into extension UI. */
+function normalizeGoalSummary(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const sourceGoals = Array.isArray(source.goals) ? source.goals : [];
+  const rawGoals = sourceGoals.slice(0, 20);
+  let remainingTasks = 64;
+  let locallyTruncated = rawGoals.length < sourceGoals.length;
+  const goals = rawGoals.map((raw) => {
+    const goal = raw && typeof raw === 'object' ? raw : {};
+    const sourceTasks = Array.isArray(goal.tasks) ? goal.tasks : [];
+    const rawTasks = sourceTasks.slice(0, remainingTasks);
+    if (rawTasks.length < sourceTasks.length) locallyTruncated = true;
+    remainingTasks -= rawTasks.length;
+    return {
+      id: safeText(goal.id, 80),
+      title: safeText(goal.title, 120),
+      status: GOAL_STATES.has(goal.status) ? goal.status : 'active',
+      updatedAt: safeTime(goal.updatedAt),
+      counts: safeTaskCounts(goal.counts),
+      tasks: rawTasks.map((rawTask) => {
+        const task = rawTask && typeof rawTask === 'object' ? rawTask : {};
+        return {
+          id: safeText(task.id, 80),
+          title: safeText(task.title, 120),
+          status: TASK_STATES.has(task.status) ? task.status : 'queued',
+          provider: AGENT_NAMES.has(task.provider) ? task.provider : null,
+          updatedAt: safeTime(task.updatedAt)
+        };
+      })
+    };
+  });
+  const rawTotals = source.totals && typeof source.totals === 'object' ? source.totals : {};
+  return {
+    ok: true,
+    totals: { goals: safeCount(rawTotals.goals), active: safeCount(rawTotals.active), ...safeTaskCounts(rawTotals) },
+    truncated: source.truncated === true || locallyTruncated,
+    goals
+  };
+}
+
+async function missionSummary() {
+  const remote = await call('/goals/summary');
+  if (!remote.ok) return { ok: false, error: remote.error || `HTTP ${remote.status}`, totals: safeTaskCounts({}), goals: [] };
+  return normalizeGoalSummary(remote.data);
+}
+
 const HANDLERS = {
   async register_document(_message, sender) {
     return registerDocument(sender, _message);
@@ -1442,6 +1517,19 @@ const HANDLERS = {
   },
   async opsStatus() {
     return operationsStatus();
+  },
+  async goalSummary() {
+    return missionSummary();
+  },
+  async openMissionControl() {
+    try {
+      const current = await chrome.windows.getCurrent();
+      if (!current || !Number.isInteger(current.id)) return { ok: false, error: 'window_not_found' };
+      await chrome.sidePanel.open({ windowId: current.id });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: String(error && error.message ? error.message : error) };
+    }
   },
   async syncNow() {
     await load();
