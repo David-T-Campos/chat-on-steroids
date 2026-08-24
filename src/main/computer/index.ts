@@ -30,6 +30,20 @@ const HELPER_TIMEOUT_MS = 30_000;
 
 export class ComputerError extends Error {}
 
+/**
+ * Some Windows applications expose a UI Automation root whose provider crashes while
+ * descendants are enumerated. The window can still be captured and driven by coordinates,
+ * so this one provider failure is a degraded semantic result rather than a failure of the
+ * whole computer-use tool. Other UIA/helper errors remain fatal.
+ */
+export function isUnavailableUiProviderError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('UIA_FAILED:') &&
+    (message.includes('RPC_E_SERVERFAULT') || message.includes('0x80010105'))
+  );
+}
+
 export interface Rect {
   x: number;
   y: number;
@@ -437,7 +451,16 @@ async function findUiLocked(
     role: opts.role ?? '',
     maxResults: Math.min(100, Math.max(1, Math.floor(opts.maxResults ?? 30)))
   };
-  let reply = await runHelper(request);
+  let reply: Record<string, any>;
+  try {
+    reply = await runHelper(request);
+  } catch (error) {
+    if (!isUnavailableUiProviderError(error)) throw error;
+    const windowId = opts.window ?? (await activeWindow()).window?.id;
+    if (windowId === undefined) throw error;
+    logWarn(`UI Automation provider unavailable for window ${windowId}; continuing without semantic elements.`);
+    return { window: windowId, elements: [] };
+  }
   const generation = helperGeneration;
   let raw = Array.isArray(reply['elements']) ? (reply['elements'] as Array<Record<string, any>>) : [];
   // UI Automation can return an empty tree on the very first query immediately after
