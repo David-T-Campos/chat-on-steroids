@@ -123,10 +123,10 @@ Chat On Steroids publishes two MCP apps:
 
 | Connector | Purpose | Current tool names |
 | --- | --- | --- |
-| **Core** | Approved files, search, patches, terminal, session lookup, workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `session`, `agents` |
+| **Core** | Approved files, search, patches, terminal, bounded host operations, session lookup, workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `power`, `session`, `agents` |
 | **Desktop** | Screen, windows, mouse/keyboard and clipboard | `observe`, `computer` |
 
-Core declares eight possible names but exposes at most seven at once because `find` is the no-shell search fallback and is mutually exclusive with the command pair. Desktop is optional. Revoking a permission takes effect immediately even if ChatGPT still shows a schema cached earlier; refresh the app in ChatGPT and start a new chat when you change the exposed tool shape.
+Core declares nine possible names but exposes at most eight at once because `find` is the no-shell search fallback and is mutually exclusive with the command tools. `power` stays one composite schema for bounded system information, process listing and process-tree termination; all three actions use the existing command permission and re-check it on every call. Desktop is optional. Revoking a permission takes effect immediately even if ChatGPT still shows a schema cached earlier; refresh the app in ChatGPT and start a new chat when you change the exposed tool shape.
 
 The public tool contract and permission mapping live in [`docs/tool-surface.md`](docs/tool-surface.md).
 
@@ -134,7 +134,7 @@ The public tool contract and permission mapping live in [`docs/tool-surface.md`]
 
 Session recording is **on by default for new installs** and can be disabled. It stores the local history needed for the Chat timeline and `session` lookup under `%APPDATA%\chat-on-steroids\sessions\`. The small Activity log is separate, capped, redacted and memory-only. Session retention defaults to 30 days.
 
-The bundled Chrome extension adds browser-side conversation identity, page-visible transcript capture, richer tool rows, Compact & Resume, and worker-tab coordination. It runs only on `chatgpt.com` / `chat.openai.com` plus the app's loopback bridge ports. App and extension versions move together, so after updating the app, use **Reload** for the unpacked extension in `chrome://extensions`.
+The bundled Chrome extension adds browser-side conversation identity, page-visible transcript capture, richer tool rows, Compact & Resume, and worker-tab coordination. Its popup also has an Operations rail for live conversation/command counts and the three durable browser queues; **Sync now** flushes ACKs, observations and close notices in order before refreshing eligible ChatGPT tabs. It runs only on `chatgpt.com` / `chat.openai.com` plus the app's loopback bridge ports. App and extension versions move together, so after updating the app, use **Reload** for the unpacked extension in `chrome://extensions`.
 
 ### Compact & Resume
 

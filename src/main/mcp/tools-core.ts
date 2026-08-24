@@ -1,13 +1,13 @@
 /**
  * The Core connector: reading, changing and running code on this PC.
  *
- * Seven tools at the absolute maximum, and usually five. That number is the design (see
+ * Eight tools at the absolute maximum, and usually six. That number is the design (see
  * `docs/tool-surface.md` §3): a no-query discovery pull against this connector returns
  * every schema here at once, so the surface is sized for the worst case rather than for
  * the case where the harness happens to ask a narrow question.
  *
- * What used to be forty-five tools did not become seven by dropping capability. It became
- * seven by separating *primitives* from *procedures*: `exec_command` can run git, so `git`
+ * What used to be forty-five tools did not become eight by dropping capability. It became
+ * eight by separating *primitives* from *procedures*: `exec_command` can run git, so `git`
  * is a skill rather than a tool; `read` can open a directory, a text file or an image,
  * because those are three shapes of one question. Anything that reads as "and also, for
  * this special case…" belongs in a skill over these primitives, not in a schema every
@@ -124,6 +124,7 @@ import {
 import { getSession, readEvents, readRecentEvents } from '../session/store.js';
 import { getConfig } from '../config.js';
 import { tokenPressure } from '../../shared/session.js';
+import { registerPowerTool } from './tools-power.js';
 import {
   adoptAgent,
   chunkText,
@@ -767,6 +768,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           }
         })
     );
+
+    registerPowerTool(reg);
   }
 
   // ---------------------------------------------------------------- session

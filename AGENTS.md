@@ -155,8 +155,8 @@ permissions merely because the fresh-install defaults are broader.
 Do not "restore" these from an older document:
 
 - `view_image` is its own Core tool, not a mode of `read`.
-- Core declares **8** tool names but at most **7** are live: `find` and the exec pair are
-  mutually exclusive. Desktop adds at most 2. Live ceiling is 9, and reporting must derive
+- Core declares **9** tool names but at most **8** are live: `find` and the command tools are
+  mutually exclusive. Desktop adds at most 2. Live ceiling is 10, and reporting must derive
   from the surface projection, never a hardcoded count.
 - `session` has exactly two actions, `history` and `status`. Compact & Resume is app and
   browser orchestration — there is no model-visible `save_handoff`.
@@ -185,6 +185,7 @@ src/main/mcp/tools.ts         builds exactly one surface's server; refuses forei
 src/main/mcp/surfaces.ts      Core/Desktop discovery boundaries + declared tool names
 src/main/mcp/kernel.ts        dispatch, live guards, caller/workspace identity, agent inbox
 src/main/mcp/tools-core.ts    Core registration + connector wrappers
+src/main/mcp/tools-power.ts   one bounded host/process schema behind command permission
 src/main/mcp/tools-desktop.ts Desktop registration + wrappers
 src/main/mcp/inbound.ts       x-request-id extraction and normalization
 src/main/mcp/call-context.ts  AsyncLocalStorage per call + in-flight accounting
@@ -226,7 +227,7 @@ extension/chatgpt-dom.js      EVERY ChatGPT selector and DOM-shape assumption
 extension/content.js          page recorder, turn lifecycle, Overwrite, compact UI
 extension/fiber.js            MAIN-world React/Fiber evidence reader (least trusted)
 extension/background.js       service worker: token, journal, tab↔conversation registry
-extension/popup.*             status/reconnect UI
+extension/popup.*             status/reconnect UI + operations/sync evidence
 
 ── other ──────────────────────────────────────────────────────────────────
 src/renderer/main.ts          setup/settings/connection/activity UI
@@ -278,6 +279,7 @@ earn it today.
 | `find` | `search` **and not** `command` | `tools-core.ts` → `search.ts` |
 | `apply_patch` | any of `create`/`edit`/`move`/`deleteFile` | `codex/apply-patch/*` |
 | `exec_command`, `write_stdin` | `command` | `codex/unified-exec.ts` |
+| `power` | `command` | `tools-power.ts` → `exec.ts` |
 | `session` | recording enabled | session subsystem |
 | `agents` | multi-agent enabled | `agents.ts` |
 

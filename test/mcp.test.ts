@@ -15,6 +15,7 @@
  */
 
 import http from 'node:http';
+import { spawn as spawnChild } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -568,7 +569,7 @@ describe('surface boundaries', () => {
     everything();
     const names = toolNames(await core('tools/list'));
     // find is absent because exec_command is present — they are mutually exclusive.
-    expect(names).toEqual(['agents', 'apply_patch', 'exec_command', 'read', 'session', 'view_image', 'write_stdin']);
+    expect(names).toEqual(['agents', 'apply_patch', 'exec_command', 'power', 'read', 'session', 'view_image', 'write_stdin']);
     for (const name of surfaceDefinition('desktop').tools) expect(names, name).not.toContain(name);
   });
 
@@ -654,7 +655,7 @@ describe('surface boundaries', () => {
     for (const marker of ['computer', 'observe', 'click_ref', 'captureAfter', 'write_clipboard']) {
       expect(coreBody, marker).not.toContain(marker);
     }
-    for (const marker of ['apply_patch', 'exec_command', 'write_stdin', 'save_handoff', 'Begin Patch']) {
+    for (const marker of ['apply_patch', 'exec_command', 'power', 'write_stdin', 'save_handoff', 'Begin Patch']) {
       expect(desktopBody, marker).not.toContain(marker);
     }
   });
@@ -728,9 +729,9 @@ describe('surface boundaries', () => {
     const coreTools = toolList(await core('tools/list'));
     const desktopTools = toolList(await desktop('tools/list'));
 
-    // Counts are the design: Core is capped at seven live schemas because find and the exec
-    // pair cannot both exist, and Desktop is two.
-    expect(coreTools).toHaveLength(7);
+    // Counts are the design: Core is capped at eight live schemas because find and the exec
+    // pair cannot both exist, and Desktop is two. Power remains one composite schema.
+    expect(coreTools).toHaveLength(8);
     expect(desktopTools).toHaveLength(2);
 
     // And the size, which is what a discovery pull actually costs the model on every
@@ -740,7 +741,7 @@ describe('surface boundaries', () => {
     // catches the regression it exists to catch.
     const coreBytes = Buffer.byteLength(JSON.stringify(coreTools), 'utf8');
     const desktopBytes = Buffer.byteLength(JSON.stringify(desktopTools), 'utf8');
-    expect(coreBytes, `core tools/list is ${coreBytes} bytes`).toBeLessThan(18_000);
+    expect(coreBytes, `core tools/list is ${coreBytes} bytes`).toBeLessThan(21_000);
     expect(desktopBytes, `desktop tools/list is ${desktopBytes} bytes`).toBeLessThan(8_500);
 
     // Per tool as well as per surface, so one schema cannot quietly eat the whole budget
@@ -754,7 +755,15 @@ describe('surface boundaries', () => {
     for (const tool of [...coreTools, ...desktopTools]) {
       const bytes = Buffer.byteLength(JSON.stringify(tool), 'utf8');
       const budget =
-        tool.name === 'computer' ? 6_000 : tool.name === 'apply_patch' ? 5_000 : tool.name === 'agents' ? 3_400 : 3_000;
+        tool.name === 'computer'
+          ? 6_000
+          : tool.name === 'apply_patch'
+            ? 5_000
+            : tool.name === 'agents'
+              ? 3_400
+              : tool.name === 'power'
+                ? 3_500
+                : 3_000;
       expect(bytes, `${tool.name} schema is ${bytes} bytes`).toBeLessThan(budget);
     }
   });
@@ -957,7 +966,104 @@ describe('capability gating', () => {
     ctx.caps = withCaps({ command: true });
     const names = toolNames(await core('tools/list'));
     expect(names).toContain('exec_command');
+    expect(names).toContain('power');
     expect(names).toContain('write_stdin');
+  });
+
+  it('reports bounded system facts through power and fails closed after command revocation', async () => {
+    ctx.readOnly = false;
+    ctx.caps = withCaps({ command: true });
+
+    expect(toolNames(await core('tools/list'))).toContain('power');
+    expect(toolNames(await desktop('tools/list'))).not.toContain('power');
+
+    const info = await core('tools/call', {
+      name: 'power',
+      arguments: { action: { type: 'system_info' } }
+    });
+    expect(failed(info)).toBe(false);
+    expect(info.body.result?.structuredContent).toMatchObject({
+      action: 'system_info',
+      platform: process.platform,
+      architecture: process.arch
+    });
+    expect(info.body.result?.structuredContent?.cpu_count).toBeGreaterThan(0);
+    expect(info.body.result?.structuredContent).not.toHaveProperty('hostname');
+    expect(info.body.result?.structuredContent).not.toHaveProperty('environment');
+
+    // The schema stays present for ChatGPT's cached snapshot, but the live capability is
+    // authoritative and must refuse before even a read-only host action runs.
+    ctx.caps = withCaps({ command: false });
+    expect(toolNames(await core('tools/list'))).toContain('power');
+    const denied = await core('tools/call', {
+      name: 'power',
+      arguments: { action: { type: 'system_info' } }
+    });
+    expect(failed(denied)).toBe(true);
+    expect(textOf(denied)).toContain('TOOL_DISABLED');
+  });
+
+  it.skipIf(!IS_WINDOWS)('returns a capped structured process snapshot and protects the app process', async () => {
+    ctx.readOnly = false;
+    ctx.caps = withCaps({ command: true });
+
+    const listed = await core('tools/call', {
+      name: 'power',
+      arguments: { action: { type: 'process_list', limit: 5 } }
+    });
+    expect(failed(listed)).toBe(false);
+    expect(listed.body.result?.structuredContent).toMatchObject({
+      action: 'process_list',
+      returned: expect.any(Number),
+      truncated: expect.any(Boolean)
+    });
+    expect(listed.body.result?.structuredContent?.processes.length).toBeLessThanOrEqual(5);
+    expect(listed.body.result?.structuredContent?.processes[0]).toMatchObject({
+      pid: expect.any(Number),
+      name: expect.any(String),
+      cpu_seconds: expect.any(Number),
+      memory_bytes: expect.any(Number)
+    });
+
+    const protectedCall = await core('tools/call', {
+      name: 'power',
+      arguments: { action: { type: 'process_kill', pid: process.pid } }
+    });
+    expect(failed(protectedCall)).toBe(true);
+    expect(textOf(protectedCall)).toContain('PROTECTED_PROCESS');
+  });
+
+  it.skipIf(!IS_WINDOWS)('terminates one disposable process tree and reports only after exit', async () => {
+    ctx.readOnly = false;
+    ctx.caps = withCaps({ command: true });
+    const child = spawnChild(process.execPath, ['-e', 'setInterval(() => undefined, 1000)'], {
+      windowsHide: true,
+      stdio: 'ignore'
+    });
+    await new Promise<void>((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.once('error', reject);
+    });
+    const pid = child.pid!;
+    try {
+      const killed = await core('tools/call', {
+        name: 'power',
+        arguments: { action: { type: 'process_kill', pid } }
+      });
+      expect(failed(killed)).toBe(false);
+      expect(killed.body.result?.structuredContent).toEqual({
+        action: 'process_kill',
+        pid,
+        terminated: true
+      });
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // The expected path already terminated it.
+      }
+    }
   });
 
   it('drops find when exec_command can do the same job better', async () => {

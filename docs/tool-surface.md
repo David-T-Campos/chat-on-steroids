@@ -1,7 +1,7 @@
 # Model-facing tool surface
 
 This is the current public reference for the tool surface. The implementation and tests are
-authoritative; `src/main/mcp/surfaces.ts`, `src/main/mcp/tools-core.ts`,
+authoritative; `src/main/mcp/surfaces.ts`, `src/main/mcp/tools-core.ts`, `src/main/mcp/tools-power.ts`,
 `src/main/mcp/tools-desktop.ts` and `test/mcp.test.ts` should agree with this file.
 
 ## Connectors
@@ -11,17 +11,17 @@ permission boundaries and use separate secret tokenized local paths.
 
 | Connector | Purpose | Possible tools |
 | --- | --- | --- |
-| **Chat On Steroids Core** | Approved files, patches, terminal, recorded-session lookup, workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `session`, `agents` |
+| **Chat On Steroids Core** | Approved files, patches, terminal, bounded host operations, recorded-session lookup, workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `power`, `session`, `agents` |
 | **Chat On Steroids Desktop** | Screen, windows, mouse/keyboard and clipboard | `observe`, `computer` |
 
 The Desktop connector is optional. Core is the main connector.
 
-On a fresh 1.9.4 config, all tool permissions, session recording and multi-agent mode are
+On a fresh config, all tool permissions, session recording and multi-agent mode are
 enabled, while read-only mode is off. Existing configs keep explicit choices during upgrades;
 missing legacy permissions are not silently widened.
 
-With the fresh all-on capability snapshot, Core advertises seven schemas:
-`read`, `view_image`, `apply_patch`, `exec_command`, `write_stdin`, `session`, and `agents`.
+With the fresh all-on capability snapshot, Core advertises eight schemas:
+`read`, `view_image`, `apply_patch`, `exec_command`, `write_stdin`, `power`, `session`, and `agents`.
 `find` is the search fallback for a snapshot where search is enabled and command execution is
 unavailable. Tool exposure is monotonic within a running connector instance, so a permission
 changed mid-conversation can leave a previously exposed name listed; its handler still enforces
@@ -60,6 +60,19 @@ folders. Long-running commands return an opaque `session_id` that `write_stdin` 
 
 Writes to or polls a live command session by `session_id`, with optional yield time and output
 budget. A blank `chars` value is a poll rather than a separate process-status tool.
+
+### `power`
+
+One composite host-operations schema, available only with the command permission. Its bounded
+actions are `system_info`, `process_list`, and `process_kill`. System information excludes the
+hostname and environment; the process snapshot excludes command lines and is capped at 100
+rows; termination rejects the app's own PID and direct parent before using the existing
+process-tree terminator. A live permission guard runs on every action even when ChatGPT retained
+an older schema snapshot.
+
+`power` is deliberately not a catalogue of product-specific procedures. Repository workflows,
+including Project Inmersion conventions, belong in skills and project instructions over the
+general file/command primitives rather than in permanently exposed MCP schemas.
 
 ### `session`
 
@@ -110,6 +123,8 @@ can keep observation available while disabling state-changing desktop actions.
 - Approved filesystem roots do not sandbox command execution or desktop control.
 - Tool results and validation errors are bounded; large structured or binary payloads must not
   grow without an explicit cap.
+- `power` shares the command permission and privilege boundary: its conveniences are not a new
+  elevation path, and approved filesystem roots do not contain them.
 
 ## Compatibility notes
 

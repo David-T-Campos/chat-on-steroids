@@ -18,7 +18,7 @@ const POLL_MS = 1500;
 
 let overwriteEnabled = true;
 let showTimes = false;
-let latest = { status: null, tab: null };
+let latest = { status: null, tab: null, ops: null };
 let openedOnFailure = false;
 
 // ------------------------------------------------------------------ formatting
@@ -298,14 +298,38 @@ function paintDetails(status, info) {
   detail(grid, 'page sends', page ? `${page.sends} · ${page.failures} failed` : null, Boolean(page && page.failures));
 }
 
+function paintOperations(ops, ready) {
+  const values = ops && ops.ok
+    ? {
+        opsConversations: ops.conversations,
+        opsCommands: ops.commands,
+        opsQueue: Number(ops.pendingEvents || 0) + Number(ops.pendingCloses || 0),
+        opsAcks: ops.pendingCommandAcks
+      }
+    : { opsConversations: '—', opsCommands: '—', opsQueue: '—', opsAcks: '—' };
+  for (const [id, value] of Object.entries(values)) $(id).textContent = String(value);
+  const pending = ops && Number(ops.pendingEvents || 0) + Number(ops.pendingCommandAcks || 0) + Number(ops.pendingCloses || 0);
+  $('opsCard').className = `ops-card ${!ready || !ops || !ops.ok ? 'off' : pending > 0 ? 'warn' : 'ready'}`;
+  $('syncBtn').disabled = !ready;
+  $('syncState').textContent = !ready
+    ? 'App unavailable'
+    : !ops || !ops.ok
+      ? 'Bridge check failed'
+      : pending > 0
+        ? `${pending} pending`
+        : 'All queues clear';
+}
+
 async function refresh() {
-  const [status, info] = await Promise.all([
+  const [status, info, ops] = await Promise.all([
     chrome.runtime.sendMessage({ type: 'status' }),
-    chrome.runtime.sendMessage({ type: 'tabStatus' }).catch(() => null)
+    chrome.runtime.sendMessage({ type: 'tabStatus' }).catch(() => null),
+    chrome.runtime.sendMessage({ type: 'opsStatus' }).catch(() => null)
   ]);
-  latest = { status, tab: info };
+  latest = { status, tab: info, ops };
 
   const ready = paintHeader(status);
+  paintOperations(ops, ready);
   const isChat = Boolean(info && info.isChat);
   const page = info && info.page;
 
@@ -388,6 +412,20 @@ $('copyBtn').addEventListener('click', (event) => {
 });
 
 $('more').addEventListener('toggle', () => paintDetails(latest.status, latest.tab));
+
+$('syncBtn').addEventListener('click', async () => {
+  const button = $('syncBtn');
+  button.disabled = true;
+  $('syncState').textContent = 'Syncing…';
+  try {
+    const ops = await chrome.runtime.sendMessage({ type: 'syncNow' });
+    latest.ops = ops;
+    paintOperations(ops, latest.status && latest.status.connected && latest.status.paired);
+  } catch {
+    $('syncState').textContent = 'Sync failed';
+  }
+  await refresh();
+});
 
 $('retryBtn').addEventListener('click', async () => {
   $('retryBtn').disabled = true;

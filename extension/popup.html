@@ -18,6 +18,7 @@
           <g id="i-check"><path d="M17 5.5 8.2 14.5 3.5 10" /></g>
           <g id="i-pen"><path d="M13.5 3.5 16.5 6.5 7 16H4v-3l9.5-9.5Z" /></g>
           <g id="i-clock"><circle cx="10" cy="10" r="7" /><path d="M10 6v4.3l2.8 1.7" /></g>
+          <g id="i-sync"><path d="M16 6.5A7 7 0 0 0 4.2 4.4L2.5 6M4 13.5a7 7 0 0 0 11.8 2.1l1.7-1.6" /><path d="M2.5 2.8V6h3.2M17.5 17.2V14h-3.2" /></g>
           <g id="i-more"><path d="M3 6h5M12 6h5M3 14h9M16 14h1" /><circle cx="10" cy="6" r="2" /><circle cx="14" cy="14" r="2" /></g>
         </defs>
       </svg>
@@ -74,6 +75,21 @@
     </section>
 
     <p class="alert" id="alert" hidden></p>
+
+    <p class="caption">Operations</p>
+    <section class="ops-card" id="opsCard">
+      <div class="signal-rail" aria-label="Live bridge counters">
+        <div class="signal"><strong id="opsConversations">—</strong><span>Chats</span></div>
+        <div class="signal"><strong id="opsCommands">—</strong><span>Commands</span></div>
+        <div class="signal"><strong id="opsQueue">—</strong><span>Queue</span></div>
+        <div class="signal"><strong id="opsAcks">—</strong><span>ACKs</span></div>
+      </div>
+      <button class="sync-action" id="syncBtn" type="button" aria-describedby="syncState">
+        <svg class="ico" aria-hidden="true" focusable="false"><use href="#i-sync" /></svg>
+        <span>Sync now</span>
+        <small id="syncState" role="status" aria-live="polite">Checking bridge</small>
+      </button>
+    </section>
 
     <p class="caption">Augment ChatGPT</p>
     <section class="card">

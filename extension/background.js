@@ -1342,6 +1342,72 @@ function serializeTab(tab, operation) {
   return tracked;
 }
 
+/** Ask every known or currently open ChatGPT tab to rebuild its local activity stream. */
+async function overwriteEligibleTabs() {
+  await load();
+  const known = Object.keys(tabConversations)
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value));
+  let discovered = [];
+  try {
+    discovered = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
+  } catch {
+    discovered = [];
+  }
+  const tabs = [
+    ...new Set([
+      ...known,
+      ...discovered
+        .map((tab) => (tab && typeof tab.id === 'number' ? tab.id : NaN))
+        .filter((value) => Number.isInteger(value))
+    ])
+  ];
+  let applied = 0;
+  for (const id of tabs) {
+    try {
+      const result = await chrome.tabs.sendMessage(id, { type: 'clf-overwrite-now' });
+      if (result && result.ok === true) applied += 1;
+    } catch {
+      // A tab may be between navigations/reloads and temporarily have no receiver. The
+      // durable registry remains authoritative, so a transient miss does not retire it.
+    }
+  }
+  return { tabs: applied, attempted: tabs.length };
+}
+
+/**
+ * The popup's deliberately small operational view. The authenticated app endpoint knows
+ * which conversations and commands are live; the worker owns only its three durable queues.
+ * Normalize both into counts so no ids, payloads, bridge tokens or user text cross into UI.
+ */
+async function operationsStatus() {
+  await load();
+  const local = () => ({
+    pendingEvents: journal.length,
+    pendingCommandAcks: commandAckOutbox.length,
+    pendingCloses: closeOutbox.length
+  });
+  if (disconnected) {
+    return { ok: false, error: 'disconnected', conversations: 0, commands: 0, ...local() };
+  }
+  const remote = await call('/status');
+  if (!remote.ok) {
+    return {
+      ok: false,
+      error: remote.error || `HTTP ${remote.status}`,
+      conversations: 0,
+      commands: 0,
+      ...local()
+    };
+  }
+  const conversations = Array.isArray(remote.data && remote.data.conversations)
+    ? remote.data.conversations.length
+    : 0;
+  const commandCount = Number(remote.data && remote.data.commands);
+  const commands = Number.isSafeInteger(commandCount) && commandCount >= 0 ? commandCount : 0;
+  return { ok: true, conversations, commands, ...local() };
+}
+
 const HANDLERS = {
   async register_document(_message, sender) {
     return registerDocument(sender, _message);
@@ -1374,6 +1440,20 @@ const HANDLERS = {
       extensionProtocol: BRIDGE_PROTOCOL
     };
   },
+  async opsStatus() {
+    return operationsStatus();
+  },
+  async syncNow() {
+    await load();
+    // Preserve the same ownership order as automatic delivery: a command result must
+    // reach the app before observations made by that command's page can overtake it.
+    await drainCommandAcks();
+    await drain();
+    await drainCloses();
+    const tabs = await overwriteEligibleTabs();
+    const status = await operationsStatus();
+    return { ...status, ...tabs };
+  },
   async pair() {
     await load();
     const result = await provision();
@@ -1396,40 +1476,7 @@ const HANDLERS = {
   },
   /** Ask every eligible ChatGPT tab to rebuild its Chat On Steroids activity stream now. */
   async overwriteNow() {
-    await load();
-    const known = Object.keys(tabConversations)
-      .map((value) => Number(value))
-      .filter((value) => Number.isInteger(value));
-    // The registry is authoritative for session lifetime, but it is populated only after a
-    // page has bound/observed something. A valid ChatGPT tab can therefore be absent at the
-    // exact moment the user turns Overwrite on. Discover the same host allowlist used by
-    // extension-reload recovery and union it with the durable registry. Host permissions in
-    // manifest.json already authorize URL-filtered tabs.query on these origins.
-    let discovered = [];
-    try {
-      discovered = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
-    } catch {
-      discovered = [];
-    }
-    const tabs = [
-      ...new Set([
-        ...known,
-        ...discovered
-          .map((tab) => (tab && typeof tab.id === 'number' ? tab.id : NaN))
-          .filter((value) => Number.isInteger(value))
-      ])
-    ];
-    let applied = 0;
-    for (const id of tabs) {
-      try {
-        const result = await chrome.tabs.sendMessage(id, { type: 'clf-overwrite-now' });
-        if (result && result.ok === true) applied += 1;
-      } catch {
-        // A tab may be between navigations/reloads and temporarily have no receiver. The
-        // registry is tab-lifetime state, so do not retire it merely because one send raced.
-      }
-    }
-    return { ok: true, tabs: applied, attempted: tabs.length };
+    return { ok: true, ...(await overwriteEligibleTabs()) };
   },
   /**
    * Everything this worker and the visible page know about the chat in front of the user.

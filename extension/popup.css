@@ -206,6 +206,100 @@ h1 b {
   background: var(--card);
 }
 
+/* ------------------------------------------------------ operations rail */
+
+.ops-card {
+  position: relative;
+  margin: 0 0 16px;
+  overflow: hidden;
+  border: 1px solid var(--edge);
+  border-radius: 16px;
+  background: linear-gradient(145deg, var(--card), color-mix(in srgb, var(--card) 88%, var(--green)));
+}
+
+.ops-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--faint);
+}
+
+.ops-card.ready::before {
+  background: var(--green);
+}
+
+.ops-card.warn::before {
+  background: #d8a23b;
+}
+
+.signal-rail {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  padding: 12px 10px 10px;
+}
+
+.signal {
+  min-width: 0;
+  padding: 0 8px;
+  text-align: center;
+}
+
+.signal + .signal {
+  border-left: 1px solid var(--edge);
+}
+
+.signal strong {
+  display: block;
+  color: var(--text);
+  font: 600 17px/1.1 var(--mono);
+}
+
+.signal span {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+}
+
+.sync-action {
+  display: grid;
+  grid-template-columns: 20px auto 1fr;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 42px;
+  padding: 0 13px;
+  border: 0;
+  border-top: 1px solid var(--edge);
+  background: transparent;
+  color: var(--text);
+  font: 500 12.5px/1 var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sync-action:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.sync-action small {
+  overflow: hidden;
+  color: var(--muted);
+  font: 400 10.5px/1.2 var(--sans);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-action:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .row {
   display: flex;
   align-items: center;

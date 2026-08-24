@@ -128,6 +128,26 @@ describe('extension release metadata', () => {
     expect(backgroundSource).toContain('async overwriteNow()');
     expect(backgroundSource).toContain("chrome.tabs.sendMessage(id, { type: 'clf-overwrite-now' })");
   });
+
+  it('exposes a compact operations console with live bridge evidence and one explicit sync action', async () => {
+    const dir = path.join(process.cwd(), 'extension');
+    const [html, js] = await Promise.all([
+      fs.readFile(path.join(dir, 'popup.html'), 'utf8'),
+      fs.readFile(path.join(dir, 'popup.js'), 'utf8')
+    ]);
+    for (const id of ['opsConversations', 'opsCommands', 'opsQueue', 'opsAcks', 'syncBtn']) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    expect(js).toContain("type: 'opsStatus'");
+    expect(js).toContain("type: 'syncNow'");
+    expect(html).toContain('aria-describedby="syncState"');
+    expect(html).toContain('id="syncState" role="status" aria-live="polite"');
+    expect(backgroundSource).toContain('async opsStatus()');
+    expect(backgroundSource).toContain('async syncNow()');
+    const syncHandler = backgroundSource.slice(backgroundSource.indexOf('async syncNow()'));
+    expect(syncHandler.indexOf('drainCommandAcks()')).toBeLessThan(syncHandler.indexOf('drain()'));
+    expect(syncHandler.indexOf('drain()')).toBeLessThan(syncHandler.indexOf('drainCloses()'));
+  });
 });
 
 // ---------------------------------------------------------------------- DOM
@@ -1659,6 +1679,90 @@ describe('extension connection', () => {
     expect(status.paired).toBe(true);
     expect(status.disconnected).toBe(false);
     expect(local.data.disconnected).toBe(false);
+  });
+
+  it('normalizes authenticated operations status without exposing bridge payload details', async () => {
+    const fetch = vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/status') {
+        return response(200, {
+          ok: true,
+          conversations: ['11111111-2222-3333-4444-555555555555', 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
+          commands: 3,
+          ignored: { secret: 'must not cross the worker boundary' }
+        });
+      }
+      return response(404, {});
+    });
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea(),
+      fetch
+    });
+
+    const status = await worker.send({ type: 'opsStatus' });
+
+    expect(status).toEqual({
+      ok: true,
+      conversations: 2,
+      commands: 3,
+      pendingEvents: 0,
+      pendingCommandAcks: 0,
+      pendingCloses: 0
+    });
+    expect(JSON.stringify(status)).not.toContain('secret');
+  });
+
+  it('syncs durable browser work in order and refreshes known and discovered ChatGPT tabs', async () => {
+    const calls: string[] = [];
+    let healthy = false;
+    const fetch = vi.fn(async (input: string) => {
+      const url = new URL(input);
+      calls.push(url.pathname);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/events') return healthy ? response(200, { ok: true }) : response(503, { error: 'retry' });
+      if (url.pathname === '/status') {
+        return response(200, { ok: true, conversations: ['11111111-2222-3333-4444-555555555555'], commands: 1 });
+      }
+      return response(200, { ok: true });
+    });
+    const session = new FakeStorageArea();
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session,
+      fetch
+    });
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    await worker.send({
+      type: 'events',
+      conversationId,
+      entries: [{ conversationId, event: { kind: 'progress', time: 1, text: 'queued before manual sync' } }]
+    });
+    expect(journalOf(session)).toHaveLength(1);
+    await worker.send({ type: 'bind', conversationId }, 11);
+    worker.tabsQuery.mockResolvedValueOnce([{ id: 12 }]);
+
+    healthy = true;
+    calls.length = 0;
+    const synced = await worker.send({ type: 'syncNow' });
+
+    expect(calls.indexOf('/events')).toBeGreaterThanOrEqual(0);
+    expect(calls.indexOf('/status')).toBeGreaterThan(calls.indexOf('/events'));
+    expect(journalOf(session)).toEqual([]);
+    expect(synced).toMatchObject({
+      ok: true,
+      conversations: 1,
+      commands: 1,
+      pendingEvents: 0,
+      pendingCommandAcks: 0,
+      pendingCloses: 0,
+      tabs: 3,
+      attempted: 3
+    });
+    expect(worker.tabsSendMessage).toHaveBeenCalledWith(1, { type: 'clf-overwrite-now' });
+    expect(worker.tabsSendMessage).toHaveBeenCalledWith(11, { type: 'clf-overwrite-now' });
+    expect(worker.tabsSendMessage).toHaveBeenCalledWith(12, { type: 'clf-overwrite-now' });
   });
 
   it('forces an immediate overwrite in known and newly discovered ChatGPT tabs', async () => {
