@@ -1,0 +1,99 @@
+import { describe, expect, it, vi } from 'vitest';
+
+const fake = vi.hoisted(() => {
+  type Listener = { fn: (...args: any[]) => void; once: boolean };
+  class Emitter {
+    private readonly listeners = new Map<string, Listener[]>();
+    on(event: string, fn: (...args: any[]) => void) {
+      const list = this.listeners.get(event) ?? [];
+      list.push({ fn, once: false });
+      this.listeners.set(event, list);
+      return this;
+    }
+    once(event: string, fn: (...args: any[]) => void) {
+      const list = this.listeners.get(event) ?? [];
+      list.push({ fn, once: true });
+      this.listeners.set(event, list);
+      return this;
+    }
+    emit(event: string, ...args: any[]) {
+      const list = [...(this.listeners.get(event) ?? [])];
+      this.listeners.set(
+        event,
+        (this.listeners.get(event) ?? []).filter((entry) => !entry.once)
+      );
+      for (const entry of list) entry.fn(...args);
+    }
+  }
+
+  const children: any[] = [];
+  const spawn = vi.fn(() => {
+    const index = children.length;
+    const child = new Emitter() as any;
+    child.pid = 9200 + index;
+    child.exitCode = null;
+    child.stdout = new Emitter();
+    child.stderr = new Emitter();
+    child.stdin = {
+      write(line: string, _encoding: string, callback: (error?: Error | null) => void) {
+        callback(null);
+        const request = JSON.parse(line) as { op: string };
+        const reply =
+          request.op === 'find_ui'
+            ? {
+                ok: true,
+                window: 77,
+                elements: [
+                  {
+                    runtimeKey: 'old-helper-runtime-id',
+                    name: 'Old button',
+                    role: 'Button',
+                    automationId: 'old-button',
+                    enabled: true,
+                    offscreen: false,
+                    bounds: { x: 10, y: 10, width: 20, height: 20 }
+                  }
+                ]
+              }
+            : { ok: true, cursor: { x: 0, y: 0 } };
+        queueMicrotask(() => child.stdout.emit('data', Buffer.from(`${JSON.stringify(reply)}\n`)));
+        return true;
+      },
+      end() {}
+    };
+    children.push(child);
+    queueMicrotask(() => child.emit('spawn'));
+    return child;
+  });
+  return { children, spawn };
+});
+
+vi.mock('node:child_process', () => ({ spawn: fake.spawn }));
+vi.mock('../src/main/env.js', () => ({
+  ensureUsablePath: vi.fn(),
+  normalizeEnvironment: (env: NodeJS.ProcessEnv) => ({ ...env }),
+  setEnvValue: (env: NodeJS.ProcessEnv, key: string, value: string) => {
+    env[key] = value;
+  }
+}));
+vi.mock('../src/main/exec.js', () => ({
+  findWindowsPowerShell: () => 'powershell.exe',
+  terminateProcessTree: vi.fn(async () => undefined)
+}));
+vi.mock('../src/main/logger.js', () => ({ logWarn: vi.fn() }));
+
+import { act, findUi } from '../src/main/computer/index.js';
+
+describe('semantic desktop ref lifetime', () => {
+  it('invalidates refs as soon as their helper dies, before a replacement starts', async () => {
+    const found = await findUi({ window: 77, maxResults: 5 });
+    const ref = found.elements[0]!.ref;
+    expect(fake.spawn).toHaveBeenCalledTimes(1);
+
+    fake.children[0].exitCode = 0;
+    fake.children[0].emit('close');
+
+    await expect(act([{ type: 'click_ref', ref }])).rejects.toThrow(/STALE_REF/);
+    expect(fake.spawn).toHaveBeenCalledTimes(1);
+  });
+});
