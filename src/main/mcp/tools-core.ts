@@ -1401,11 +1401,8 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
             if (cleared.cleared !== 'worker') return fail(`ChatGPT worker ${task.runId} is no longer active.`);
             cancelled = cancelGoalTask(input.goal_id, input.task_id);
           } else {
-            if (reg.ctx.readOnly || !reg.caps.command) {
-              return fail(
-                'TOOL_DISABLED: cancelling an external agent task requires command permission and read-only mode to be off.'
-              );
-            }
+            // Revoking command permission stops new launches, but must never take away the
+            // emergency stop for a child this app already owns.
             cancelled = await cancelAgentTask(input.goal_id, input.task_id);
           }
           if (!(await persistCriticalGoalsNow())) {

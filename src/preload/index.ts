@@ -16,6 +16,7 @@ import type {
   SwarmState,
   TokenPressure
 } from '../shared/session.js';
+import type { Goal, GoalsState, GoalTask } from '../shared/goals.js';
 
 type Reply<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -82,6 +83,21 @@ const api = {
   // happened comes back in the result — the renderer does not decide it.
   clearAgent: (id: string) => call<ClearAgentResult>('swarm:clearAgent', id),
 
+  listGoals: () => call<GoalsState>('goals:list'),
+  createGoal: (input: { title: string; objective: string; tasks: Array<{ title: string; acceptance: string }> }) =>
+    call<Goal>('goals:create', input),
+  addGoalTasks: (goalId: string, tasks: Array<{ title: string; acceptance: string }>) =>
+    call<Goal>('goals:addTasks', { goalId, tasks }),
+  startGoalTask: (input: {
+    goalId: string;
+    taskId: string;
+    provider: 'claude-code' | 'hermes';
+    root: string;
+    maxTurns?: number;
+    maxBudgetUsd?: number;
+  }) => call<GoalTask>('goals:start', input),
+  cancelGoalTask: (goalId: string, taskId: string) => call<GoalTask>('goals:cancel', { goalId, taskId }),
+
   onStateChanged: (listener: (state: AppState) => void): (() => void) => {
     const wrapped = (_event: unknown, state: AppState): void => listener(state);
     ipcRenderer.on('state:changed', wrapped);
@@ -101,6 +117,11 @@ const api = {
     const wrapped = (_event: unknown, state: SwarmState): void => listener(state);
     ipcRenderer.on('swarm:changed', wrapped);
     return () => ipcRenderer.removeListener('swarm:changed', wrapped);
+  },
+  onGoalsChanged: (listener: (state: GoalsState) => void): (() => void) => {
+    const wrapped = (_event: unknown, state: GoalsState): void => listener(state);
+    ipcRenderer.on('goals:changed', wrapped);
+    return () => ipcRenderer.removeListener('goals:changed', wrapped);
   }
 };
 

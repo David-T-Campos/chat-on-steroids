@@ -40,6 +40,15 @@ import {
 } from './session/store.js';
 import { activeSessionId, forgetSession, onSessionChange } from './session/recorder.js';
 import { clearAgent, onSwarmChange, resetSwarm, swarmState } from './agents.js';
+import {
+  addGoalTasks,
+  cancelGoalTask as cancelLedgerTask,
+  createGoal,
+  goalState,
+  onGoalsChange,
+  persistCriticalGoalsNow
+} from './goals.js';
+import { cancelAgentTask, refreshAgentTask, startAgentTask } from './agent-runner.js';
 import { tokenPressure } from '../shared/session.js';
 
 /** The only URLs the renderer may ask the OS to open. */
@@ -111,6 +120,12 @@ const renameRoot = z.object({
     .max(32)
     .regex(/^[a-z0-9][a-z0-9._-]*$/, 'Lowercase letters, digits, dot, dash and underscore only')
 });
+
+const goalTaskInput = z.object({
+  title: z.string().trim().min(1).max(120),
+  acceptance: z.string().trim().min(1).max(4000)
+});
+const goalIdInput = z.string().min(10).max(80);
 
 function resolvedBinary(config: Config): string | null {
   if (config.tunnel.kind === 'cloudflared') return locateBinary('cloudflared', config.tunnel.binaryPath);
@@ -395,6 +410,93 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return { cleared: outcome.cleared, reason: outcome.reason, swarm: swarmState() };
   });
 
+  // ------------------------------------------------------------------ goals
+
+  const reconcileGoals = async () => {
+    for (const goal of goalState().goals) {
+      for (const task of goal.tasks) {
+        if (task.status === 'running' && (task.provider === 'claude-code' || task.provider === 'hermes')) {
+          await refreshAgentTask(goal.id, task.id).catch(() => undefined);
+        }
+      }
+    }
+    if (!(await persistCriticalGoalsNow())) {
+      throw new Error('Goal state could not cross its durable acceptance barrier.');
+    }
+    return goalState();
+  };
+
+  handle('goals:list', async () => reconcileGoals());
+  handle('goals:create', async (payload) => {
+    const input = z
+      .object({
+        title: z.string().trim().min(1).max(120),
+        objective: z.string().trim().min(1).max(8000),
+        tasks: z.array(goalTaskInput).max(32).default([])
+      })
+      .parse(payload);
+    const goal = createGoal(input);
+    if (!(await persistCriticalGoalsNow())) throw new Error('The goal could not be saved durably.');
+    return goal;
+  });
+  handle('goals:addTasks', async (payload) => {
+    const input = z
+      .object({ goalId: goalIdInput, tasks: z.array(goalTaskInput).min(1).max(32) })
+      .parse(payload);
+    const goal = addGoalTasks(input.goalId, input.tasks);
+    if (!(await persistCriticalGoalsNow())) throw new Error('The new goal tasks could not be saved durably.');
+    return goal;
+  });
+  handle('goals:start', async (payload) => {
+    const input = z
+      .object({
+        goalId: goalIdInput,
+        taskId: goalIdInput,
+        provider: z.enum(['claude-code', 'hermes']),
+        root: z.string().min(1).max(32).regex(/^[a-z0-9][a-z0-9._-]*$/),
+        maxTurns: z.number().int().min(1).max(100).optional(),
+        maxBudgetUsd: z.number().min(0.01).max(1000).optional()
+      })
+      .parse(payload);
+    const config = getConfig();
+    if (!config.multiAgent.enabled) throw new Error('Multi-agent mode is switched off.');
+    if (config.readOnly || !config.capabilities.command) {
+      throw new Error('External agents require command permission and read-only mode to be off.');
+    }
+    const root = config.roots.find((candidate) => candidate.name === input.root);
+    if (!root) throw new Error(`Approved folder /${input.root} was not found.`);
+    const task = await startAgentTask({
+      goalId: input.goalId,
+      taskId: input.taskId,
+      provider: input.provider,
+      workspace: { real: root.path, virtual: `/${root.name}` },
+      ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }),
+      ...(input.maxBudgetUsd === undefined ? {} : { maxBudgetUsd: input.maxBudgetUsd })
+    });
+    if (!(await persistCriticalGoalsNow())) {
+      await cancelAgentTask(input.goalId, input.taskId).catch(() => undefined);
+      throw new Error('The external task could not be saved durably.');
+    }
+    return task;
+  });
+  handle('goals:cancel', async (payload) => {
+    const input = z.object({ goalId: goalIdInput, taskId: goalIdInput }).parse(payload);
+    const task = goalState(input.goalId).goals[0]!.tasks.find((candidate) => candidate.id === input.taskId);
+    if (!task || task.status !== 'running' || !task.provider || !task.runId) {
+      throw new Error('That goal task is not running.');
+    }
+    const cancelled =
+      task.provider === 'chatgpt'
+        ? (() => {
+            const cleared = clearAgent(task.runId!);
+            if (cleared.cleared !== 'worker') throw new Error(`ChatGPT worker ${task.runId} is no longer active.`);
+            return cancelLedgerTask(input.goalId, input.taskId);
+          })()
+        : await cancelAgentTask(input.goalId, input.taskId);
+    if (!(await persistCriticalGoalsNow())) throw new Error('Task cancellation could not be saved durably.');
+    return cancelled;
+  });
+
 
   // Push updates so the UI reflects tunnel progress without polling. buildState() crosses
   // async secret/bridge reads, so an older snapshot can otherwise resolve after a newer one and
@@ -412,4 +514,5 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
   onLog((entry) => getWindow()?.webContents.send('log:entry', entry));
   onSessionChange(() => getWindow()?.webContents.send('session:changed'));
   onSwarmChange(() => getWindow()?.webContents.send('swarm:changed', swarmState()));
+  onGoalsChange(() => getWindow()?.webContents.send('goals:changed', goalState()));
 }

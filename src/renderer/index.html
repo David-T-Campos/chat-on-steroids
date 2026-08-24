@@ -474,6 +474,7 @@
               <span class="seg" id="chatView">
                 <button class="is-sel" data-view="timeline" type="button">Timeline</button>
                 <button data-view="compact" type="button">Handoff</button>
+                <button data-view="goals" type="button">Goals</button>
               </span>
               <span class="subhead-note" id="chatState"></span>
             </div>
@@ -500,6 +501,41 @@
                     </button>
                   </h3>
                   <div id="handoffBox"></div>
+                </div>
+              </div>
+
+              <!-- durable multi-provider mission control -->
+              <div class="view" data-view="goals" hidden>
+                <div class="pane goals-pane">
+                  <form id="goalCreateForm" class="goal-create">
+                    <div class="goal-create-head">
+                      <div>
+                        <h3>Mission Control</h3>
+                        <p class="hint">Create a durable objective, then run its tasks with local Claude Code or Hermes Agent.</p>
+                      </div>
+                      <button class="btn btn-solid" id="goalCreate" type="submit">Create goal</button>
+                    </div>
+                    <div class="grid2">
+                      <div class="field">
+                        <label for="goalTitle">Goal title</label>
+                        <input id="goalTitle" type="text" maxlength="120" required />
+                      </div>
+                      <div class="field">
+                        <label for="goalTaskTitle">First task</label>
+                        <input id="goalTaskTitle" type="text" maxlength="120" />
+                      </div>
+                    </div>
+                    <div class="field">
+                      <label for="goalObjective">Objective</label>
+                      <textarea id="goalObjective" maxlength="8000" rows="2" required></textarea>
+                    </div>
+                    <div class="field">
+                      <label for="goalAcceptance">First task acceptance criteria</label>
+                      <textarea id="goalAcceptance" maxlength="4000" rows="2"></textarea>
+                    </div>
+                    <p id="goalsState" class="hint" role="status" aria-live="polite"></p>
+                  </form>
+                  <div id="goalsList"></div>
                 </div>
               </div>
 

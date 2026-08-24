@@ -148,6 +148,8 @@ Fresh installs currently enable multi-agent mode with **two workers** by default
 
 The same single `agents` tool now keeps durable goals with explicit task acceptance criteria. A goal task can run in a separate ChatGPT conversation or through a locally installed **Claude Code** or **Hermes Agent** CLI. External agent processes are owned and cancellable, run only inside an approved folder, require the app's command permission, and are stopped when the app quits. Chat On Steroids never stores their API keys or login tokens; authenticate each CLI using its own official setup flow.
 
+Open **Chat → Goals** in the desktop app for Mission Control. It can create goals, add acceptance-tested tasks, choose an approved virtual folder, start a local Claude Code or Hermes task, inspect bounded results, and cancel a running child even if command permission was revoked after launch. Native folder paths, environment values, provider credentials and raw command lines never enter the renderer. Goals survive app restarts; a provider task interrupted by restart is marked failed explicitly instead of being silently resumed.
+
 This is experimental browser automation, and parallel chats can edit the same files or spend account limits quickly. Use it only on work you can recover, keep worker ownership explicit, and turn the feature off when you do not want ChatGPT tabs opened or coordinated automatically. The terms note in [Experimental browser augmentation and OpenAI terms](#experimental-browser-augmentation-and-openai-terms) applies here.
 
 ## Troubleshooting

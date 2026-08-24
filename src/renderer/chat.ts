@@ -26,6 +26,7 @@ import { ATTRIBUTION_LABELS, TURN_OUTCOME_LABELS, foldProgress } from '../shared
 import { chronological } from '../shared/chronology.js';
 import type { AppState, Config } from '../shared/types.js';
 import { $, ago, clockTime, compactNumber, el, icon, run, toast } from './dom.js';
+import { initGoals, refreshGoals } from './goals.js';
 
 const api = window.api;
 
@@ -944,6 +945,7 @@ async function refreshAll(): Promise<void> {
   await loadSessions();
   const swarmNow = await run(api.getSwarm());
   if (swarmNow) paintSwarm(swarmNow);
+  await refreshGoals();
 }
 
 /** Sessions change on every recorded event, so the reload is coalesced. */
@@ -984,6 +986,7 @@ function toggleSettings(): void {
 
 export function initChat(next: Deps): void {
   deps = next;
+  initGoals({ state: next.state });
 
   $('sessionList').addEventListener('click', (event) => {
     const row = (event.target as HTMLElement).closest<HTMLElement>('[data-id]');

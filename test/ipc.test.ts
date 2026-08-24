@@ -35,6 +35,7 @@ const { pendingCommands, resetBridgeForTests, setBrowserOpener, startBridge, sto
   '../src/main/bridge.js'
 );
 const { resetSwarm, spawn } = await import('../src/main/agents.js');
+const { goalState, onGoalsPersistNow, resetGoalsForTests } = await import('../src/main/goals.js');
 const { registerIpc } = await import('../src/main/ipc.js');
 const { makeTempDir, removeTempDir } = await import('./helpers.js');
 
@@ -73,6 +74,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   resetSwarm();
+  resetGoalsForTests();
+  onGoalsPersistNow(async () => undefined);
   resetBridgeForTests();
   // The app opens the worker's chat itself; a command only exists while a page it opened
   // still has it to redeem.
@@ -81,6 +84,39 @@ beforeEach(async () => {
     ...defaultConfig(),
     sessions: { ...defaultConfig().sessions, record: true },
     multiAgent: { enabled: true, maxWorkers: 3 }
+  });
+});
+
+describe('desktop goal control', () => {
+  it('creates and lists a bounded desktop-owned goal through named IPC channels', async () => {
+    const create = handlers.get('goals:create');
+    const list = handlers.get('goals:list');
+    expect(create).toBeTypeOf('function');
+    expect(list).toBeTypeOf('function');
+
+    const created = (await create!(null, {
+      title: 'Desktop mission',
+      objective: 'Coordinate a local provider',
+      tasks: [{ title: 'Audit', acceptance: 'Return findings' }]
+    })) as any;
+    expect(created.ok).toBe(true);
+    expect(created.data).toMatchObject({ title: 'Desktop mission', status: 'active' });
+
+    const listed = (await list!(null, undefined)) as any;
+    expect(listed.ok).toBe(true);
+    expect(listed.data.goals).toHaveLength(1);
+    expect(JSON.stringify(listed.data)).not.toMatch(/conversationId|token|secret|api.?key/i);
+    expect(goalState().goals[0]!.title).toBe('Desktop mission');
+  });
+
+  it('rejects malformed goal input before mutating the ledger', async () => {
+    const reply = (await handlers.get('goals:create')!(null, {
+      title: ' ',
+      objective: 'x',
+      tasks: []
+    })) as any;
+    expect(reply.ok).toBe(false);
+    expect(goalState().goals).toEqual([]);
   });
 });
 

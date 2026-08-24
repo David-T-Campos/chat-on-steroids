@@ -66,7 +66,7 @@ describe('the session card header', () => {
     const views = [...document.getElementById('chatView')!.querySelectorAll('[data-view]')].map(
       (button) => (button as HTMLElement).dataset.view
     );
-    expect(views).toEqual(['timeline', 'compact']);
+    expect(views).toEqual(['timeline', 'compact', 'goals']);
     // The view itself still exists — only its entry point moved.
     expect(document.querySelector('#chatBody > .view[data-view="settings"]')).not.toBeNull();
   });
@@ -143,6 +143,17 @@ describe('the session-row delete affordance', () => {
  * the invariant that was actually violated, and it is checkable.
  */
 describe('the chat panel cards', () => {
+  it('offers Mission Control as a real chat view with an accessible create form and live region', () => {
+    const goalsButton = document.querySelector<HTMLButtonElement>('#chatView [data-view="goals"]');
+    const goalsView = document.querySelector<HTMLElement>('#chatBody > [data-view="goals"]');
+    expect(goalsButton?.textContent).toMatch(/Goals/i);
+    expect(goalsView).not.toBeNull();
+    expect(goalsView?.querySelector('form#goalCreateForm')).not.toBeNull();
+    expect(goalsView?.querySelector('label[for="goalTitle"]')).not.toBeNull();
+    expect(goalsView?.querySelector('#goalsState')?.getAttribute('aria-live')).toBe('polite');
+    expect(goalsView?.querySelector('#goalsList')).not.toBeNull();
+  });
+
   /** The track list a card's own rule declares, as an array. */
   function tracks(selector: string): string[] {
     const declarations = rule(selector);
