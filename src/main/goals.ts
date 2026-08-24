@@ -244,6 +244,23 @@ export function failGoalTask(goalId: string, taskId: string, error: string): Goa
   return clone(task);
 }
 
+export function cancelGoalTask(goalId: string, taskId: string): GoalTask {
+  const goal = goalById(goalId);
+  ensureActive(goal);
+  const task = taskById(goal, taskId);
+  ensureRunning(task);
+  const at = Date.now();
+  task.status = 'cancelled';
+  task.runId = null;
+  task.result = null;
+  task.error = null;
+  task.updatedAt = at;
+  task.finishedAt = at;
+  goal.updatedAt = at;
+  changed();
+  return clone(task);
+}
+
 export function goalState(goalId?: string): GoalsState {
   if (goalId !== undefined) return { goals: [clone(goalById(goalId))] };
   return { goals: [...goals.values()].map((goal) => clone(goal)) };
@@ -291,4 +308,3 @@ export function resetGoalsForTests(): void {
   listeners.clear();
   persist = null;
 }
-

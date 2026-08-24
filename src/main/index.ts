@@ -42,6 +42,7 @@ import {
   type ContinuationSnapshot
 } from './session/continuation.js';
 import { onGoalsPersist, restoreGoals, snapshotGoals, type GoalsSnapshot } from './goals.js';
+import { stopAllAgentTasks } from './agent-runner.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
@@ -318,7 +319,11 @@ app.on('will-quit', (event) => {
     // Phase 1: stop both listeners from admitting work and let accepted requests drain.
     await runPhase('admission/drain', [disconnect(), stopBridge()]);
     // Phase 2: only after request handlers are done may their owned child processes go.
-    await runPhase('process cleanup', [unifiedExecManager.terminateAllProcesses(), stopComputerHelper()]);
+    await runPhase('process cleanup', [
+      unifiedExecManager.terminateAllProcesses(),
+      stopComputerHelper(),
+      stopAllAgentTasks()
+    ]);
     // Phase 3: recorder work can enqueue both session projections and named durable state.
     await runPhase('recorder flush', [flushRecorder()]);
     // These are independent writers. One rejection must never skip the other flush.
