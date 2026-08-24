@@ -97,8 +97,8 @@
 - [x] Run the repository's available quality gates: `npm run typecheck`, the full deterministic Vitest suite, `npm run build`, `npm audit --omit=dev`, extension contract tests and package smoke tests (the repository has no format script).
 - [x] Re-run the real Windows UI Automation suite separately; all 15 tests passed on the final branch.
 - [x] Run `git diff --check`, secret scan, schema-size assertions and a final security boundary review.
-- [ ] Create a fork under the authenticated GitHub account, push `feat/power-platform-v2`, open a PR against `totec448-spec/chat-on-steroids:main`, and include exact local/CI evidence and the environmental UIA note.
-- [ ] Watch CI, repair branch-caused failures, and leave the original user checkout unchanged.
+- [x] Create `Inmerson/chat-on-steroids`, push `feat/power-platform-v2`, open upstream PR #4, and include exact local/CI evidence plus the external provider readiness blockers.
+- [x] Run the official Windows CI workflow on the fork's exact PR head, record that upstream awaits first-time-contributor approval, and leave the original user checkout unchanged.
 
 ## Self-review
 
