@@ -6,6 +6,9 @@ export const EXTERNAL_AGENT_PROVIDERS = ['claude-code', 'hermes'] as const;
 export type ExternalAgentProvider = (typeof EXTERNAL_AGENT_PROVIDERS)[number];
 export const MAX_AGENT_PROMPT_CHARS = 16_000;
 export const MAX_AGENT_RESULT_CHARS = 16_000;
+export const DEFAULT_CLAUDE_MAX_TURNS = 12;
+export const DEFAULT_CLAUDE_MAX_BUDGET_USD = 2;
+export const MAX_CLAUDE_BUDGET_USD = 100;
 const MAX_PROVIDER_ERROR_CHARS = 2_000;
 
 const providerSchema = z.enum(EXTERNAL_AGENT_PROVIDERS);
@@ -14,7 +17,7 @@ const launchSchema = z
     provider: providerSchema,
     prompt: z.string().trim().min(1).max(MAX_AGENT_PROMPT_CHARS),
     maxTurns: z.number().int().min(1).max(100).optional(),
-    maxBudgetUsd: z.number().finite().min(0.01).max(1_000).optional()
+    maxBudgetUsd: z.number().finite().min(0.01).max(MAX_CLAUDE_BUDGET_USD).optional()
   })
   .strict();
 
@@ -66,8 +69,8 @@ export function buildAgentInvocation(request: AgentLaunchRequest): AgentInvocati
 
   if (input.provider === 'claude-code') {
     const args = ['-p', input.prompt, '--output-format', 'json'];
-    if (input.maxTurns !== undefined) args.push('--max-turns', String(input.maxTurns));
-    if (input.maxBudgetUsd !== undefined) args.push('--max-budget-usd', String(input.maxBudgetUsd));
+    args.push('--max-turns', String(input.maxTurns ?? DEFAULT_CLAUDE_MAX_TURNS));
+    args.push('--max-budget-usd', String(input.maxBudgetUsd ?? DEFAULT_CLAUDE_MAX_BUDGET_USD));
     // Task prompts and their outputs belong to this app's bounded ledger. Avoid also leaving
     // a second, provider-owned transcript behind unless a future explicit resume feature
     // needs it.

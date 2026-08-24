@@ -1445,6 +1445,33 @@ input[readonly] {
   margin: 0;
 }
 
+.provider-guides {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.provider-guides button {
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.provider-guides button:hover {
+  text-decoration: underline;
+}
+
+.provider-guides button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
 .goal-card {
   padding: 13px;
   box-shadow: 0 1px 0 color-mix(in srgb, var(--edge) 40%, transparent);

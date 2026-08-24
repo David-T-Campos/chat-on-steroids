@@ -59,7 +59,9 @@ const ALLOWED_LINKS = new Set([
   'https://github.com/openai/tunnel-client/releases',
   'https://github.com/totec448-spec/chat-on-steroids/releases/latest/download/Chat-On-Steroids-Extension.zip',
   'https://developers.openai.com/api/docs/guides/secure-mcp-tunnels',
-  'https://developers.openai.com/api/docs/guides/developer-mode'
+  'https://developers.openai.com/api/docs/guides/developer-mode',
+  'https://code.claude.com/docs/en/setup',
+  'https://hermes-agent.nousresearch.com/docs/getting-started/installation/'
 ]);
 
 const capabilityPatch = z.object(
@@ -455,7 +457,7 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
         provider: z.enum(['claude-code', 'hermes']),
         root: z.string().min(1).max(32).regex(/^[a-z0-9][a-z0-9._-]*$/),
         maxTurns: z.number().int().min(1).max(100).optional(),
-        maxBudgetUsd: z.number().min(0.01).max(1000).optional()
+        maxBudgetUsd: z.number().min(0.01).max(100).optional()
       })
       .parse(payload);
     const config = getConfig();

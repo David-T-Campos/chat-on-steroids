@@ -27,6 +27,7 @@ import {
 
 import type { Check, Diagnosis } from '../shared/types.js';
 import { surfaceIsUseful } from './mcp/surfaces.js';
+import { healthCheckForAgentProvider, probeAgentProviders } from './agent-health.js';
 
 async function fetchJson(
   url: string,
@@ -249,6 +250,27 @@ export async function runDiagnostics(): Promise<Diagnosis> {
         ? 'Nothing is switched on, so the connector would expose no tools.'
         : `${config.roots.length} folder${config.roots.length === 1 ? '' : 's'} shared; on: ${enabled.join(', ')}${config.readOnly ? ' (read-only)' : ''}`
   });
+
+  // Optional local providers. A fixed --version probe proves installation only; each CLI
+  // owns its own sign-in and the app never reads credential files to guess at readiness.
+  if (config.multiAgent.enabled) {
+    checks.push(...(await probeAgentProviders()).map(healthCheckForAgentProvider));
+  } else {
+    checks.push(
+      {
+        name: 'Claude Code agent',
+        status: 'skipped',
+        ok: null,
+        detail: 'Multi-agent mode is switched off.'
+      },
+      {
+        name: 'Hermes Agent',
+        status: 'skipped',
+        ok: null,
+        detail: 'Multi-agent mode is switched off.'
+      }
+    );
+  }
 
   // 2. Our own server, end to end, over the same URL the tunnel uses.
   if (!isServerRunning() || !status.localUrl) {

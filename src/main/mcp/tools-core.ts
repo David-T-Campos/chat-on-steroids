@@ -1193,9 +1193,9 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
         max_budget_usd: z
           .number()
           .min(0.01)
-          .max(1000)
+          .max(100)
           .optional()
-          .describe('goal_assign for Claude Code: spend ceiling in US dollars.')
+          .describe('goal_assign for Claude Code: spend ceiling in US dollars (default 2, hard maximum 100).')
       }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
     },

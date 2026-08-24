@@ -104,6 +104,9 @@ cannot be proven. Goal ownership uses that same exact conversation evidence and 
 all public goal projections. Claude Code and Hermes are launched as fixed, shell-free argv only
 when command permission is live, read-only mode is off and the workdir resolves inside an approved
 root; each CLI keeps its own authentication, so no provider credential enters MCP or the extension.
+Provider exits are reconciled automatically, every run has a 30-minute deadline, and app shutdown
+stops all owned children. Claude Code defaults to 12 turns and a US$2 budget ceiling; an explicit
+budget may not exceed US$100. Hermes is run in quiet single-query mode and never with `--yolo`.
 
 ## Desktop tools
 

@@ -12,7 +12,8 @@ import {
   cancelGoalTask,
   completeGoalTask,
   failGoalTask,
-  goalState
+  goalState,
+  persistCriticalGoalsNow
 } from './goals.js';
 import {
   getManagedProcess,
@@ -22,6 +23,8 @@ import {
 } from './process-manager.js';
 
 const PROVIDER_OUTPUT_LINES = 1_000;
+const RECONCILE_INTERVAL_MS = 1_000;
+export const DEFAULT_AGENT_TASK_TIMEOUT_MS = 30 * 60_000;
 
 export interface ApprovedAgentWorkspace {
   /** Already resolved through the approved-root sandbox by the calling boundary. */
@@ -41,6 +44,7 @@ interface OwnedRun {
   taskId: string;
   provider: ExternalAgentProvider;
   processId: string;
+  deadlineAt: number;
 }
 
 interface AgentProcessOperations {
@@ -57,6 +61,9 @@ const defaultProcessOperations: AgentProcessOperations = {
 
 let processOperations = defaultProcessOperations;
 const owned = new Map<string, OwnedRun>();
+const refreshFlights = new Map<string, Promise<GoalTask>>();
+let reconcileTimer: NodeJS.Timeout | null = null;
+let reconcileFlight: Promise<void> | null = null;
 
 function runKey(goalId: string, taskId: string): string {
   return `${goalId}:${taskId}`;
@@ -108,6 +115,58 @@ function failLostRun(run: OwnedRun, error: unknown): GoalTask {
   return failGoalTask(run.goalId, run.taskId, `Owned provider process was lost: ${detail}`);
 }
 
+function stopReconcileTimerIfIdle(): void {
+  if (owned.size > 0 || !reconcileTimer) return;
+  clearInterval(reconcileTimer);
+  reconcileTimer = null;
+}
+
+function reconcileOwnedRuns(): Promise<void> {
+  if (reconcileFlight) return reconcileFlight;
+  const flight = (async () => {
+    try {
+      for (const run of [...owned.values()]) {
+        try {
+          const task = taskFor(run.goalId, run.taskId);
+          if (task.status !== 'running') {
+            owned.delete(runKey(run.goalId, run.taskId));
+            continue;
+          }
+          if (Date.now() >= run.deadlineAt) {
+            await processOperations.stop(run.processId, 80).catch(() => undefined);
+            owned.delete(runKey(run.goalId, run.taskId));
+            if (taskFor(run.goalId, run.taskId).status === 'running') {
+              failGoalTask(
+                run.goalId,
+                run.taskId,
+                'Provider task exceeded the 30 minute runtime deadline and was stopped.'
+              );
+            }
+            continue;
+          }
+          await refreshAgentTask(run.goalId, run.taskId);
+        } catch {
+          // refreshAgentTask converts provider/process failures into task failures. The only
+          // remaining errors are stale concurrent lifecycle calls, which the next sweep sees.
+        }
+      }
+      await persistCriticalGoalsNow().catch(() => false);
+    } finally {
+      stopReconcileTimerIfIdle();
+    }
+  })().finally(() => {
+    if (reconcileFlight === flight) reconcileFlight = null;
+  });
+  reconcileFlight = flight;
+  return flight;
+}
+
+function ensureReconcileTimer(): void {
+  if (reconcileTimer) return;
+  reconcileTimer = setInterval(() => void reconcileOwnedRuns(), RECONCILE_INTERVAL_MS);
+  reconcileTimer.unref?.();
+}
+
 export async function startAgentTask(input: StartAgentTaskInput): Promise<GoalTask> {
   validateWorkspace(input.workspace);
   const key = runKey(input.goalId, input.taskId);
@@ -131,8 +190,10 @@ export async function startAgentTask(input: StartAgentTaskInput): Promise<GoalTa
       goalId: input.goalId,
       taskId: input.taskId,
       provider: input.provider,
-      processId: process.id
+      processId: process.id,
+      deadlineAt: Date.now() + DEFAULT_AGENT_TASK_TIMEOUT_MS
     });
+    ensureReconcileTimer();
     return task;
   } catch (error) {
     // A child that cannot be bound to its ledger entry has no owner. End it before
@@ -142,7 +203,7 @@ export async function startAgentTask(input: StartAgentTaskInput): Promise<GoalTa
   }
 }
 
-export async function refreshAgentTask(goalId: string, taskId: string): Promise<GoalTask> {
+async function refreshAgentTaskOnce(goalId: string, taskId: string): Promise<GoalTask> {
   const current = taskFor(goalId, taskId);
   if (current.status !== 'running') {
     throw new Error(`Task ${taskId} is terminal or not running (state ${current.status})`);
@@ -168,6 +229,18 @@ export async function refreshAgentTask(goalId: string, taskId: string): Promise<
   }
 }
 
+export function refreshAgentTask(goalId: string, taskId: string): Promise<GoalTask> {
+  const key = runKey(goalId, taskId);
+  const current = refreshFlights.get(key);
+  if (current) return current;
+  const flight = refreshAgentTaskOnce(goalId, taskId).finally(() => {
+    if (refreshFlights.get(key) === flight) refreshFlights.delete(key);
+    stopReconcileTimerIfIdle();
+  });
+  refreshFlights.set(key, flight);
+  return flight;
+}
+
 export async function cancelAgentTask(goalId: string, taskId: string): Promise<GoalTask> {
   const current = taskFor(goalId, taskId);
   if (current.status !== 'running') {
@@ -178,11 +251,15 @@ export async function cancelAgentTask(goalId: string, taskId: string): Promise<G
   if (!run) return failGoalTask(goalId, taskId, 'Owned provider process was lost before it could be cancelled.');
   await processOperations.stop(run.processId, 80);
   owned.delete(key);
+  stopReconcileTimerIfIdle();
   return cancelGoalTask(goalId, taskId);
 }
 
 /** Application-shutdown owner for every provider process started through this module. */
 export async function stopAllAgentTasks(): Promise<void> {
+  if (reconcileTimer) clearInterval(reconcileTimer);
+  reconcileTimer = null;
+  await reconcileFlight?.catch(() => undefined);
   const runs = [...owned.values()];
   await Promise.all(
     runs.map(async (run) => {
@@ -200,6 +277,7 @@ export async function stopAllAgentTasks(): Promise<void> {
       }
     })
   );
+  stopReconcileTimerIfIdle();
 }
 
 /** Dependency seam used by lifecycle tests; production callers never replace these operations. */
@@ -208,7 +286,10 @@ export function setAgentProcessOperationsForTests(operations: AgentProcessOperat
 }
 
 export function resetAgentRunnerForTests(): void {
+  if (reconcileTimer) clearInterval(reconcileTimer);
+  reconcileTimer = null;
+  reconcileFlight = null;
+  refreshFlights.clear();
   owned.clear();
   processOperations = defaultProcessOperations;
 }
-

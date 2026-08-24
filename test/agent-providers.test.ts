@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 const {
+  DEFAULT_CLAUDE_MAX_BUDGET_USD,
+  DEFAULT_CLAUDE_MAX_TURNS,
   MAX_AGENT_PROMPT_CHARS,
   buildAgentInvocation,
   parseAgentResult,
@@ -8,6 +10,14 @@ const {
 } = await import('../src/main/agent-providers.js');
 
 describe('external agent invocations', () => {
+  it('applies conservative Claude turn and spend ceilings when callers omit them', () => {
+    const invocation = buildAgentInvocation({ provider: 'claude-code', prompt: 'Bound this task.' });
+    expect(invocation.args).toContain('--max-turns');
+    expect(invocation.args).toContain(String(DEFAULT_CLAUDE_MAX_TURNS));
+    expect(invocation.args).toContain('--max-budget-usd');
+    expect(invocation.args).toContain(String(DEFAULT_CLAUDE_MAX_BUDGET_USD));
+  });
+
   it('builds a bounded, non-interactive Claude Code argv without a shell command string', () => {
     const prompt = 'Audit src/main/bridge.ts; do not edit. && echo should-not-run';
     const invocation = buildAgentInvocation({
@@ -53,7 +63,7 @@ describe('external agent invocations', () => {
     expect(() => buildAgentInvocation({ provider: 'unknown' as never, prompt: 'work' })).toThrow(/provider/i);
     expect(() => buildAgentInvocation({ provider: 'hermes', prompt: ' ' })).toThrow(/prompt/i);
     expect(() => buildAgentInvocation({ provider: 'claude-code', prompt: 'work', maxTurns: 0 })).toThrow(/turn/i);
-    expect(() => buildAgentInvocation({ provider: 'claude-code', prompt: 'work', maxBudgetUsd: 1_001 })).toThrow(
+    expect(() => buildAgentInvocation({ provider: 'claude-code', prompt: 'work', maxBudgetUsd: 101 })).toThrow(
       /budget/i
     );
     expect(() => buildAgentInvocation({ provider: 'hermes', prompt: 'x'.repeat(MAX_AGENT_PROMPT_CHARS + 1) })).toThrow(

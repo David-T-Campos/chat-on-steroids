@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ManagedProcessStatus } from '../src/main/process-manager.js';
 
 const { createGoal, goalState, resetGoalsForTests } = await import('../src/main/goals.js');
 const {
   cancelAgentTask,
+  DEFAULT_AGENT_TASK_TIMEOUT_MS,
   refreshAgentTask,
   resetAgentRunnerForTests,
   setAgentProcessOperationsForTests,
@@ -52,6 +53,10 @@ function oneTask(): { goalId: string; taskId: string } {
 beforeEach(() => {
   resetGoalsForTests();
   resetAgentRunnerForTests();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('starting provider tasks', () => {
@@ -116,6 +121,47 @@ describe('starting provider tasks', () => {
 });
 
 describe('reconciling provider tasks', () => {
+  it('collects a finished provider result without waiting for a UI or MCP poll', async () => {
+    vi.useFakeTimers();
+    let status = processStatus();
+    setAgentProcessOperationsForTests({
+      start: async () => status,
+      get: () => status,
+      stop: async () => processStatus({ running: false, exitCode: 130 })
+    });
+    const ids = oneTask();
+    await startAgentTask({ ...ids, provider: 'hermes', workspace: { real: 'C:\\approved', virtual: '/repo' } });
+    status = processStatus({ running: false, exitCode: 0, stdout: 'Autonomous result collected.' });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(goalState(ids.goalId).goals[0]!.tasks[0]).toMatchObject({
+      status: 'completed',
+      result: 'Autonomous result collected.'
+    });
+  });
+
+  it('stops and fails a provider that exceeds the owned runtime deadline', async () => {
+    vi.useFakeTimers();
+    const stopped = vi.fn(async () => processStatus({ running: false, exitCode: 130 }));
+    setAgentProcessOperationsForTests({
+      start: async () => processStatus(),
+      get: () => processStatus(),
+      stop: stopped
+    });
+    const ids = oneTask();
+    await startAgentTask({ ...ids, provider: 'hermes', workspace: { real: 'C:\\approved', virtual: '/repo' } });
+
+    vi.setSystemTime(Date.now() + DEFAULT_AGENT_TASK_TIMEOUT_MS + 1);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(stopped).toHaveBeenCalledWith('p1', 80);
+    expect(goalState(ids.goalId).goals[0]!.tasks[0]).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/deadline|stopped/i)
+    });
+  });
+
   it('keeps a live task running, then records a proven Claude result exactly once', async () => {
     let status = processStatus();
     setAgentProcessOperationsForTests({

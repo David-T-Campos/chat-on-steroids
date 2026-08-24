@@ -225,6 +225,7 @@ src/main/agents.ts            the one global star-topology multi-agent broker
 src/main/goals.ts             durable goal/task ledger and exact conversation ownership
 src/main/agent-providers.ts   fixed shell-free Claude Code and Hermes argv/result adapters
 src/main/agent-runner.ts      owned external-provider process lifecycle
+src/main/agent-health.ts      fixed credential-blind provider version probes
 src/main/agent-secrets.ts     exceptional agent recovery-key handling
 extension/chatgpt-dom.js      EVERY ChatGPT selector and DOM-shape assumption
 extension/content.js          page recorder, turn lifecycle, Overwrite, compact UI
@@ -613,8 +614,14 @@ permission live, read-only off and an approved workdir. The CLIs own their authe
 no provider key/token may cross MCP, IPC, bridge or extension state. Every child is owned by
 one task, has a cancel route and is stopped by the application shutdown phase.
 
+Provider tasks reconcile their own terminal result once per second; they do not depend on a UI
+or model status poll. A 30-minute deadline stops and fails a stuck child. Claude Code always has
+turn and spend ceilings (defaults 12 / US$2, hard spend maximum US$100), while Hermes must never
+receive `--yolo`. Diagnostics may run only fixed `--version` probes and must not inspect provider
+credential files or report native paths from multiline version output.
+
 **Tests.** `agents.test.ts`, `swarm.test.ts`, `goals.test.ts`, `agent-providers.test.ts`,
-`agent-runner.test.ts`.
+`agent-runner.test.ts`, `agent-health.test.ts`.
 
 ## 17. Renderer, IPC, connection and desktop
 

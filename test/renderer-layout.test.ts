@@ -152,6 +152,8 @@ describe('the chat panel cards', () => {
     expect(goalsView?.querySelector('label[for="goalTitle"]')).not.toBeNull();
     expect(goalsView?.querySelector('#goalsState')?.getAttribute('aria-live')).toBe('polite');
     expect(goalsView?.querySelector('#goalsList')).not.toBeNull();
+    expect(goalsView?.textContent).toContain('Claude Code setup');
+    expect(goalsView?.textContent).toContain('Hermes setup');
   });
 
   /** The track list a card's own rule declares, as an array. */
