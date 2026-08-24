@@ -220,4 +220,3 @@ export function initGoals(next: GoalsDeps): void {
   });
   api.onGoalsChanged((state) => paintGoals(state));
 }
-

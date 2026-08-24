@@ -36,4 +36,3 @@ export interface Goal {
 export interface GoalsState {
   goals: Goal[];
 }
-
