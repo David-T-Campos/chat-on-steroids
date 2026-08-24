@@ -45,6 +45,9 @@ jobs:
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
+      - name: Verify public-history privacy
+        run: node scripts/verify-public-history.mjs
+
       # Release notes are written by hand and reviewed in the tagged tree. Generating
       # them here would mean the release said something nobody read before it shipped.
       - name: Require reviewed release notes for this tag

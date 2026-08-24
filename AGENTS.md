@@ -726,6 +726,7 @@ npm install
 npm run dev                              # electron-vite dev
 npm run typecheck
 npm test -- --run test/<target>.test.ts
+npm run verify:privacy                   # public Git identity/session/path gate
 npm run verify                           # typecheck + full Vitest suite
 npm run build                            # electron-vite bundles
 npm run dist                             # icon+tunnel+rg fetch, build, NSIS installer → release/
@@ -825,7 +826,10 @@ so the installers a release carries are built from the tag being published insid
 that publishes them, and never travel between runs. A tag alone no longer builds anything.
 `publish.yml` refuses a non-tag ref, refuses a tag with no reviewed
 `docs/release-notes/vX.Y.Z.md`, re-checks the packaging runner's SHA-256 sums before
-attaching the files, and refuses to overwrite an existing release. `release.yml` on
+attaching the files, runs the public-history privacy gate again, and refuses to overwrite an
+existing release. Maintainers and agents install the versioned Git hooks with
+`npm run hooks:install`; those hooks reject personal maintainer identities and Claude session
+provenance before it can be committed or pushed. `release.yml` on
 `workflow_dispatch` still produces an unpublished candidate from any ref.
 
 ## 21. Security-sensitive areas
