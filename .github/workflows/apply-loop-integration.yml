@@ -1,4 +1,4 @@
-name: Apply loop integration
+name: Apply loop fix
 
 on:
   push:
@@ -9,51 +9,31 @@ permissions:
 
 jobs:
   patch:
-    if: ${{ !contains(github.event.head_commit.message, '[loop-integrated]') }}
+    if: ${{ !contains(github.event.head_commit.message, '[loop-fix]') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: feature/loop-mode
-      - name: Retarget current source contracts
+      - name: Make regex captures explicit under noUncheckedIndexedAccess
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('scripts/apply-loop-integration.py')
+          p = Path('src/main/loop.ts')
           text = p.read_text()
-          text = text.replace(
-              '"  /** Sends the current composer text, after verifying ChatGPT accepted it. */",',
-              '"  async function send() {",'
-          )
-          text = text.replace(
-              '  /** Sends the current composer text, after verifying ChatGPT accepted it. */\'\'\'',
-              '  async function send() {\'\'\''
-          )
-          text = text.replace(
-              "['read', 'view_image', 'apply_patch', 'exec_command', 'write_stdin', 'session', 'agents']",
-              "['agents', 'apply_patch', 'exec_command', 'read', 'session', 'view_image', 'write_stdin']",
-              1
-          )
-          text = text.replace(
-              "['read', 'view_image', 'apply_patch', 'exec_command', 'write_stdin', 'loop', 'session', 'agents']",
-              "['agents', 'apply_patch', 'exec_command', 'loop', 'read', 'session', 'view_image', 'write_stdin']",
-              1
-          )
-          text = text.replace(
-              'text = p.read_text().replace("toBeLessThanOrEqual(7)", "toBeLessThanOrEqual(8)")',
-              'text = p.read_text().replace("toBeLessThanOrEqual(7)", "toBeLessThanOrEqual(8)").replace("toHaveLength(7)", "toHaveLength(8)").replace("capped at seven live schemas", "capped at eight live schemas")'
-          )
+          text = text.replace('Number.parseInt(leading[1], 10)', "Number.parseInt(leading[1] ?? '', 10)")
+          text = text.replace('compactUnit(leading[2])', "compactUnit(leading[2] ?? '')")
+          text = text.replace('Number.parseInt(trailing[1], 10)', "Number.parseInt(trailing[1] ?? '', 10)")
+          text = text.replace('compactUnit(trailing[2])', "compactUnit(trailing[2] ?? '')")
           p.write_text(text)
           PY
-      - name: Patch integration points
-        run: python3 scripts/apply-loop-integration.py
-      - name: Commit integration
+      - name: Commit fix
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src extension test docs
-          git commit -m "feat: integrate first-class /loop mode [loop-integrated]"
+          git add src/main/loop.ts
+          git commit -m "fix: make loop parser captures type-safe [loop-fix]"
           git push origin HEAD:feature/loop-mode
