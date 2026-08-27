@@ -43,6 +43,7 @@ import {
   loopStateFor,
   loopViewFor,
   openPendingLoopNow,
+  settleDynamicLoop,
   startLoopNow
 } from './loop.js';
 import { logInfo, logWarn } from './logger.js';
@@ -1750,6 +1751,25 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       return json(res, 200, { claimed, loop: loopStateFor(id) }, origin);
     } catch (err) {
       logWarn(`bridge: could not durably bind New Chat /loop for ${id} — ${err instanceof Error ? err.message : String(err)}`);
+      return json(res, 503, { error: 'loop_not_durable', retryable: true }, origin);
+    }
+  }
+
+  if (route === '/loop/settle' && req.method === 'POST') {
+    let body: Record<string, unknown>;
+    try {
+      body = (await readBody(req)) as Record<string, unknown>;
+    } catch (err) {
+      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
+      return json(res, 400, { error: 'bad_request' }, origin);
+    }
+    const id = conversationId(body['conversationId']);
+    if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    try {
+      const stopped = await settleDynamicLoop(id);
+      return json(res, 200, { stopped }, origin);
+    } catch (err) {
+      logWarn(`bridge: could not durably settle /loop turn for ${id} — ${err instanceof Error ? err.message : String(err)}`);
       return json(res, 503, { error: 'loop_not_durable', retryable: true }, origin);
     }
   }

@@ -1990,6 +1990,17 @@ const HANDLERS = {
     });
     return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
   },
+  async loop_settle(message, _sender, source) {
+    await load();
+    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+    const conversationId = cleanConversationId(message.conversationId);
+    if (!conversationId) return { ok: false, status: 400, error: 'bad_conversation_id' };
+    const result = await call('/loop/settle', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId, clientId: String(source.tab) })
+    });
+    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
+  },
   async loop_ack(message, _sender, source) {
     await load();
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
@@ -2256,6 +2267,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     'loop_open',
     'loop_claim',
     'loop_ack',
+    'loop_settle',
     'goal_draft',
     'goal_focus',
     'goal_ack',

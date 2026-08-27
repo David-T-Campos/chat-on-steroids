@@ -893,7 +893,20 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
 
   // ------------------------------------------------------------------- loop
 
-  registerLoopTool(reg);
+  const loopSurfaceExposed =
+    !ctx.readOnly &&
+    (exposedCaps.browse ||
+      exposedCaps.search ||
+      exposedCaps.read ||
+      exposedCaps.metadata ||
+      exposedCaps.create ||
+      exposedCaps.edit ||
+      exposedCaps.move ||
+      exposedCaps.deleteFile ||
+      exposedCaps.command ||
+      reg.sessionToolsExposed ||
+      reg.agentToolsExposed);
+  if (loopSurfaceExposed) registerLoopTool(reg);
 
   // ---------------------------------------------------------------- session
 

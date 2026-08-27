@@ -81,7 +81,7 @@ Codex's collection-window behaviour so one interactive response is gathered whol
 
 ### `loop`
 
-A small scheduler-control schema used only by an active self-paced `/loop`. `schedule_wakeup` chooses the next one-shot delay (60–3600 seconds), reason and no-op signal; `stop` ends the loop. The handler resolves the exact ChatGPT conversation from request-id evidence and refuses calls outside an active dynamic loop. Fixed loops never use it because the app owns their cadence.
+A small scheduler-control schema used only by an active self-paced `/loop`. `schedule_wakeup` chooses the next one-shot delay (60–3600 seconds), reason and no-op signal; `stop` ends the loop. The handler resolves the exact ChatGPT conversation from request-id evidence and refuses calls outside an active dynamic loop. Fixed loops never use it because the app owns their cadence. A fresh read-only or otherwise empty Core endpoint does not advertise this state-changing scheduler control.
 
 ### `session`
 

@@ -1572,6 +1572,12 @@
       });
     }
     if (endedTurnId) emit({ kind: 'turn_end', turnId: endedTurnId, ...result });
+    // Dynamic /loop's one recovery iteration is allowed to run to completion before the
+    // runtime decides it failed to pace itself. The endpoint is idempotent and ignores every
+    // ordinary turn, so reload/adoption can report the same settlement safely.
+    if (endedTurnId && conversationId && loopConfig && loopConfig.active && loopConfig.mode === 'dynamic') {
+      void ask({ type: 'loop_settle', conversationId }).catch(() => undefined);
+    }
     // The compaction turn settling is the moment the brief exists. Read here, from this
     // generation's own section, while `ended` still names it — a tick later the page is just
     // a transcript again and this answer is indistinguishable from any other.

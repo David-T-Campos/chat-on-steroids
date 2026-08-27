@@ -172,7 +172,7 @@ function secondsFor(amount: number, unit: 's' | 'm' | 'h' | 'd'): number {
 
 function closest(target: number, candidates: readonly number[]): number {
   return candidates.reduce((best, value) =>
-    Math.abs(value - target) < Math.abs(best - target) ? value : best
+    Math.abs(value - target) <= Math.abs(best - target) ? value : best
   );
 }
 
@@ -588,6 +588,21 @@ export async function stopDynamicLoop(conversationId: string): Promise<boolean> 
 }
 
 /**
+ * Called after a browser turn genuinely settles. It only has work to do for the single
+ * recovery iteration that was fired because the preceding dynamic iteration forgot to
+ * schedule or stop. A pacing tool call during that recovery resets fallbackMisses/nextAt,
+ * so this becomes a no-op when the model did make a valid decision.
+ */
+export async function settleDynamicLoop(conversationId: string): Promise<boolean> {
+  const record = loopForConversation(conversationId);
+  if (!record || record.mode !== 'dynamic' || record.fallbackMisses < 1 || record.nextAt !== null) return false;
+  loops.delete(conversationId);
+  drafts.delete(conversationId);
+  await changedNow();
+  return true;
+}
+
+/**
  * Returns/claims a due scheduled message for this exact browser client. Merely reading status
  * never advances a schedule. The first client to claim a due generation owns it until it ACKs;
  * a duplicate tab gets null rather than the same user message.
@@ -605,7 +620,7 @@ export function loopViewFor(conversationId: string, clientId: string): LoopView 
   if (!clientId || record.nextAt === null || record.nextAt > now) return publicView(record, null);
 
   // One fallback is the runtime's recovery for a dynamic iteration that forgot its pacing
-  // decision. If the fallback iteration itself later forgets too, ackLoopDraft stops it.
+  // decision. If the fallback iteration itself later forgets too, settleDynamicLoop stops it after the browser reports that turn finished.
   if (record.mode === 'dynamic') {
     if (record.fallbackArmed) record.fallbackMisses += 1;
     record.fallbackArmed = false;
@@ -658,9 +673,10 @@ export async function ackLoopDraft(
 
   if (record.mode === 'dynamic' && record.nextAt === null) {
     if (record.fallbackMisses >= 1) {
-      // This was already the one runtime fallback and it still produced no pacing decision.
-      loops.delete(conversationId);
-      await changedNow();
+      // This is the one recovery iteration. Do not end it at the user-message ACK: the
+      // assistant has not run yet and must still be allowed to call the loop pacing tool.
+      // finishGeneration reports the completed turn through /loop/settle instead.
+      changed();
       return true;
     }
     record.nextAt = Date.now() + DYNAMIC_FALLBACK_MS;

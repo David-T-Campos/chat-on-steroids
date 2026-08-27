@@ -15,6 +15,7 @@ import {
   resetLoopsForTests,
   restoreLoops,
   scheduleDynamicWakeup,
+  settleDynamicLoop,
   snapshotLoops,
   startLoopNow
 } from '../src/main/loop.js';
@@ -132,6 +133,8 @@ describe('durable loop runtime', () => {
     expect(fallback.draft).not.toBeNull();
     expect(fallback.nextAt).toBeNull();
     await ackLoopDraft('chat-a', fallback.draft!.token, 'tab-1', true);
+    expect(loopStateFor('chat-a').active).toBe(true);
+    expect(await settleDynamicLoop('chat-a')).toBe(true);
     expect(loopStateFor('chat-a').active).toBe(false);
   });
 

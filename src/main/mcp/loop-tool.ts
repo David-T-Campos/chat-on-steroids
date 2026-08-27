@@ -36,7 +36,7 @@ export function registerLoopTool(reg: SurfaceRegistrar): void {
       description:
         'Control the next one-shot wakeup for an active self-paced /loop in this exact ChatGPT conversation. ' +
         'Use only when the current user turn was started by /loop or is continuing one. ' +
-        `schedule_wakeup chooses one next delay from ${DYNAMIC_MIN_DELAY_SECONDS} to ${DYNAMIC_MAX_DELAY_SECONDS} seconds after observing this iteration; ` +
+        `schedule_wakeup chooses one next delay from ${DYNAMIC_MIN_DELAY_SECONDS} to ${DYNAMIC_MAX_DELAY_SECONDS} seconds after reviewing this iteration; ` +
         'stop ends the self-paced loop. Fixed-interval loops are owned by the app and must not call this tool. ' +
         'Do not busy-poll background work: choose a delay that reflects when new information can realistically exist.',
       inputSchema: z.discriminatedUnion('action', [
@@ -58,7 +58,7 @@ export function registerLoopTool(reg: SurfaceRegistrar): void {
               .boolean()
               .optional()
               .default(false)
-              .describe('True only when this iteration observed no meaningful change; consecutive no-op runs are counted.')
+              .describe('True only when this iteration found no meaningful change; consecutive no-op runs are counted.')
           })
           .strict(),
         z.object({ action: z.literal('stop') }).strict()
@@ -67,6 +67,21 @@ export function registerLoopTool(reg: SurfaceRegistrar): void {
     },
     async (input) =>
       guard('loop', async () => {
+        const anyCoreLive =
+          reg.caps.browse ||
+          reg.caps.search ||
+          reg.caps.read ||
+          reg.caps.metadata ||
+          reg.caps.create ||
+          reg.caps.edit ||
+          reg.caps.move ||
+          reg.caps.deleteFile ||
+          reg.caps.command ||
+          reg.sessionToolsLive ||
+          reg.agentToolsLive;
+        if (reg.ctx.readOnly || !anyCoreLive) {
+          return fail('LOOP_DISABLED: loop pacing is unavailable while Core is read-only or has no live capability.');
+        }
         const conversationId = await exactConversation();
         if (!conversationId) {
           return fail(
