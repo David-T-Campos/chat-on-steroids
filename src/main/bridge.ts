@@ -37,6 +37,15 @@ import {
   setGoalObjectiveNow,
   startGoalDraft
 } from './goal.js';
+import {
+  ackLoopDraft,
+  claimPendingLoopNow,
+  loopStateFor,
+  loopViewFor,
+  openPendingLoopNow,
+  settleDynamicLoop,
+  startLoopNow
+} from './loop.js';
 import { logInfo, logWarn } from './logger.js';
 import {
   closeConversation,
@@ -1156,6 +1165,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     const id = conversationId(url.searchParams.get('conversationId'));
     const since = Number(url.searchParams.get('since') ?? 0);
     const goalClient = (url.searchParams.get('goalClient') ?? '').slice(0, 100);
+    const loopClient = (url.searchParams.get('loopClient') ?? '').slice(0, 100);
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
     const retiredWorker = retiredWorkerForConversation(id);
     // Every open ChatGPT tab polls this for its own conversation every few seconds, so
@@ -1393,6 +1403,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
           blocked: workerBlocked ? 'worker' : '',
           draft: goalViewFor(id, goalClient)
         },
+        // Scheduled recurring work is conversation-scoped. Reading /activity may claim one
+        // due draft for this exact browser client; a second tab never receives the same turn.
+        loop: workerBlocked ? { ...loopStateFor(id), active: false, draft: null } : loopViewFor(id, loopClient),
         // Local calls still executing for *this chat*. ChatGPT-native compaction waits for
         // this to reach zero after interrupting the turn, so the handoff is written about a
         // settled machine rather than one mid-edit. Recorder-only attribution settling is
@@ -1665,6 +1678,122 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       },
       origin
     );
+  }
+
+
+  /**
+   * `/loop` control plane. Fixed cadence and self-paced state are committed before the
+   * browser crosses the send boundary, so the model cannot forget to create the schedule.
+   * New Chat has no conversation id yet, so it is fenced by the exact browser client until
+   * the page binds the id ChatGPT creates after the first send.
+   */
+  if (route === '/loop/start' && req.method === 'POST') {
+    let body: Record<string, unknown>;
+    try {
+      body = (await readBody(req)) as Record<string, unknown>;
+    } catch (err) {
+      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
+      return json(res, 400, { error: 'bad_request' }, origin);
+    }
+    const id = conversationId(body['conversationId']);
+    const input = typeof body['input'] === 'string' ? body['input'] : '';
+    if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    if (goalWorkerChat(id)) {
+      return json(
+        res,
+        409,
+        { error: 'worker_loop_disabled', message: 'Recurring user turns belong to the prime chat, not a worker chat.' },
+        origin
+      );
+    }
+    try {
+      const result = await startLoopNow(id, input);
+      return json(res, 200, result, origin);
+    } catch (err) {
+      logWarn(`bridge: could not durably update /loop for ${id} — ${err instanceof Error ? err.message : String(err)}`);
+      return json(res, 503, { error: 'loop_not_durable', retryable: true }, origin);
+    }
+  }
+
+  if (route === '/loop/open' && req.method === 'POST') {
+    let body: Record<string, unknown>;
+    try {
+      body = (await readBody(req)) as Record<string, unknown>;
+    } catch (err) {
+      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
+      return json(res, 400, { error: 'bad_request' }, origin);
+    }
+    const clientId = typeof body['clientId'] === 'string' ? body['clientId'].slice(0, 100) : '';
+    const input = typeof body['input'] === 'string' ? body['input'] : '';
+    if (!clientId) return json(res, 400, { error: 'bad_client_id' }, origin);
+    try {
+      const result = await openPendingLoopNow(clientId, input);
+      return json(res, 200, result, origin);
+    } catch (err) {
+      logWarn(`bridge: could not durably prepare New Chat /loop — ${err instanceof Error ? err.message : String(err)}`);
+      return json(res, 503, { error: 'loop_not_durable', retryable: true }, origin);
+    }
+  }
+
+  if (route === '/loop/claim' && req.method === 'POST') {
+    let body: Record<string, unknown>;
+    try {
+      body = (await readBody(req)) as Record<string, unknown>;
+    } catch (err) {
+      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
+      return json(res, 400, { error: 'bad_request' }, origin);
+    }
+    const id = conversationId(body['conversationId']);
+    const clientId = typeof body['clientId'] === 'string' ? body['clientId'].slice(0, 100) : '';
+    if (!id || !clientId) return json(res, 400, { error: 'bad_loop_claim' }, origin);
+    try {
+      const claimed = await claimPendingLoopNow(clientId, id);
+      return json(res, 200, { claimed, loop: loopStateFor(id) }, origin);
+    } catch (err) {
+      logWarn(`bridge: could not durably bind New Chat /loop for ${id} — ${err instanceof Error ? err.message : String(err)}`);
+      return json(res, 503, { error: 'loop_not_durable', retryable: true }, origin);
+    }
+  }
+
+  if (route === '/loop/settle' && req.method === 'POST') {
+    let body: Record<string, unknown>;
+    try {
+      body = (await readBody(req)) as Record<string, unknown>;
+    } catch (err) {
+      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
+      return json(res, 400, { error: 'bad_request' }, origin);
+    }
+    const id = conversationId(body['conversationId']);
+    if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    try {
+      const stopped = await settleDynamicLoop(id);
+      return json(res, 200, { stopped }, origin);
+    } catch (err) {
+      logWarn(`bridge: could not durably settle /loop turn for ${id} — ${err instanceof Error ? err.message : String(err)}`);
+      return json(res, 503, { error: 'loop_not_durable', retryable: true }, origin);
+    }
+  }
+
+  if (route === '/loop/ack' && req.method === 'POST') {
+    let body: Record<string, unknown>;
+    try {
+      body = (await readBody(req)) as Record<string, unknown>;
+    } catch (err) {
+      if ((err as Error).message === 'body_too_large') return tooLarge(res, origin);
+      return json(res, 400, { error: 'bad_request' }, origin);
+    }
+    const id = conversationId(body['conversationId']);
+    const draftToken = typeof body['token'] === 'string' ? body['token'] : '';
+    const clientId = typeof body['clientId'] === 'string' ? body['clientId'].slice(0, 100) : '';
+    const sent = body['sent'] === true;
+    if (!id || !draftToken || !clientId) return json(res, 400, { error: 'bad_loop_ack' }, origin);
+    try {
+      const acknowledged = await ackLoopDraft(id, draftToken, clientId, sent);
+      return json(res, 200, { acknowledged }, origin);
+    } catch (err) {
+      logWarn(`bridge: could not durably acknowledge /loop draft for ${id} — ${err instanceof Error ? err.message : String(err)}`);
+      return json(res, 503, { error: 'loop_not_durable', retryable: true }, origin);
+    }
   }
 
   /**

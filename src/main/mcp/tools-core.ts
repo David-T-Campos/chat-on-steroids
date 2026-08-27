@@ -143,6 +143,7 @@ import {
   type ToolResult
 } from './kernel.js';
 import { registerSessionTool as registerSessionSearchReadTool } from './session-tool.js';
+import { registerLoopTool } from './loop-tool.js';
 
 /** Entries one `read` of a directory returns before it says it stopped. */
 const MAX_DIR_ENTRIES = 200;
@@ -889,6 +890,23 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
         })
     );
   }
+
+  // ------------------------------------------------------------------- loop
+
+  const loopSurfaceExposed =
+    !ctx.readOnly &&
+    (exposedCaps.browse ||
+      exposedCaps.search ||
+      exposedCaps.read ||
+      exposedCaps.metadata ||
+      exposedCaps.create ||
+      exposedCaps.edit ||
+      exposedCaps.move ||
+      exposedCaps.deleteFile ||
+      exposedCaps.command ||
+      reg.sessionToolsExposed ||
+      reg.agentToolsExposed);
+  if (loopSurfaceExposed) registerLoopTool(reg);
 
   // ---------------------------------------------------------------- session
 

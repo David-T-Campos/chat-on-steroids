@@ -1889,7 +1889,8 @@ const HANDLERS = {
     const query =
       `?conversationId=${encodeURIComponent(message.conversationId)}` +
       `&since=${Number(message.since) || 0}` +
-      `&goalClient=${encodeURIComponent(String(source.tab))}`;
+      `&goalClient=${encodeURIComponent(String(source.tab))}` +
+      `&loopClient=${encodeURIComponent(String(source.tab))}`;
     const result = await call(`/activity${query}`);
     return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
   },
@@ -1955,6 +1956,67 @@ const HANDLERS = {
    * verbatim: it is the app's idempotency key, and a retried send must not become a second
    * message in somebody's chat.
    */
+
+  async loop_start(message, _sender, source) {
+    await load();
+    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+    const conversationId = cleanConversationId(message.conversationId);
+    if (!conversationId) return { ok: false, status: 400, error: 'bad_conversation_id' };
+    await noteTabConversation(source, conversationId);
+    const result = await call('/loop/start', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId, input: String(message.input || ''), clientId: String(source.tab) })
+    });
+    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
+  },
+  async loop_open(message, _sender, source) {
+    await load();
+    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+    const result = await call('/loop/open', {
+      method: 'POST',
+      body: JSON.stringify({ input: String(message.input || ''), clientId: String(source.tab) })
+    });
+    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
+  },
+  async loop_claim(message, _sender, source) {
+    await load();
+    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+    const conversationId = cleanConversationId(message.conversationId);
+    if (!conversationId) return { ok: false, status: 400, error: 'bad_conversation_id' };
+    await noteTabConversation(source, conversationId);
+    const result = await call('/loop/claim', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId, clientId: String(source.tab) })
+    });
+    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
+  },
+  async loop_settle(message, _sender, source) {
+    await load();
+    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+    const conversationId = cleanConversationId(message.conversationId);
+    if (!conversationId) return { ok: false, status: 400, error: 'bad_conversation_id' };
+    const result = await call('/loop/settle', {
+      method: 'POST',
+      body: JSON.stringify({ conversationId, clientId: String(source.tab) })
+    });
+    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
+  },
+  async loop_ack(message, _sender, source) {
+    await load();
+    if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
+    const conversationId = cleanConversationId(message.conversationId);
+    if (!conversationId) return { ok: false, status: 400, error: 'bad_conversation_id' };
+    const result = await call('/loop/ack', {
+      method: 'POST',
+      body: JSON.stringify({
+        conversationId,
+        token: String(message.token || ''),
+        sent: message.sent === true,
+        clientId: String(source.tab)
+      })
+    });
+    return ownsDocument(source) ? result : { ok: false, error: 'stale_document' };
+  },
   async goal_draft(message, _sender, source) {
     await load();
     if (!ownsDocument(source)) return { ok: false, error: 'stale_document' };
@@ -2201,6 +2263,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     'closed',
     'compact',
     'auto_compact_claim',
+    'loop_start',
+    'loop_open',
+    'loop_claim',
+    'loop_ack',
+    'loop_settle',
     'goal_draft',
     'goal_focus',
     'goal_ack',

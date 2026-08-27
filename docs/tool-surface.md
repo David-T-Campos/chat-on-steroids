@@ -12,7 +12,7 @@ separate secret tokenized local paths.
 
 | Connector | Purpose | Possible tools |
 | --- | --- | --- |
-| **Chat On Steroids Core** | Approved files, patches, terminal, recorded-session lookup, workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `session`, `agents` |
+| **Chat On Steroids Core** | Approved files, patches, terminal, recorded-session lookup, workers | `read`, `view_image`, `find`, `apply_patch`, `exec_command`, `write_stdin`, `loop`, `session`, `agents` |
 | **Chat On Steroids Desktop** | **Windows only:** screen, windows, mouse/keyboard and clipboard | `observe`, `computer` |
 
 The Desktop connector is optional and Windows-only. Core is the main connector everywhere.
@@ -23,8 +23,8 @@ Desktop permissions off at runtime while preserving stored choices for a config 
 Windows. Existing configs keep explicit choices during upgrades; missing legacy permissions are
 not silently widened.
 
-With the fresh all-on capability snapshot, Core advertises seven schemas:
-`read`, `view_image`, `apply_patch`, `exec_command`, `write_stdin`, `session`, and `agents`.
+With the fresh all-on capability snapshot, Core advertises eight schemas:
+`read`, `view_image`, `apply_patch`, `exec_command`, `write_stdin`, `loop`, `session`, and `agents`.
 `find` is the search fallback for a snapshot where search is enabled and command execution is
 unavailable. Tool exposure is monotonic within a running connector instance, so a permission
 changed mid-conversation can leave a previously exposed name listed; its handler still enforces
@@ -78,6 +78,10 @@ budget. A blank `chars` value is a poll rather than a separate process-status to
 poll returns as soon as the process produces output rather than holding the full yield window;
 anything that arrives afterwards stays buffered for the next poll. A non-empty write keeps
 Codex's collection-window behaviour so one interactive response is gathered whole.
+
+### `loop`
+
+A small scheduler-control schema used only by an active self-paced `/loop`. `schedule_wakeup` chooses the next one-shot delay (60–3600 seconds), reason and no-op signal; `stop` ends the loop. The handler resolves the exact ChatGPT conversation from request-id evidence and refuses calls outside an active dynamic loop. Fixed loops never use it because the app owns their cadence. A fresh read-only or otherwise empty Core endpoint does not advertise this state-changing scheduler control.
 
 ### `session`
 
