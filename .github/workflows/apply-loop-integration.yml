@@ -16,6 +16,23 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: feature/loop-mode
+      - name: Retarget current DOM helper anchor
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/apply-loop-integration.py')
+          text = p.read_text()
+          text = text.replace(
+              '"  /** Sends the current composer text, after verifying ChatGPT accepted it. */",',
+              '"  async function send() {",'
+          )
+          text = text.replace(
+              '  /** Sends the current composer text, after verifying ChatGPT accepted it. */\'\'\'',
+              '  async function send() {\'\'\''
+          )
+          p.write_text(text)
+          PY
       - name: Patch integration points
         run: python3 scripts/apply-loop-integration.py
       - name: Commit integration
