@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: feature/loop-mode
-      - name: Retarget current DOM helper anchor
+      - name: Retarget current source contracts
         shell: bash
         run: |
           python3 - <<'PY'
@@ -30,6 +30,20 @@ jobs:
           text = text.replace(
               '  /** Sends the current composer text, after verifying ChatGPT accepted it. */\'\'\'',
               '  async function send() {\'\'\''
+          )
+          text = text.replace(
+              "['read', 'view_image', 'apply_patch', 'exec_command', 'write_stdin', 'session', 'agents']",
+              "['agents', 'apply_patch', 'exec_command', 'read', 'session', 'view_image', 'write_stdin']",
+              1
+          )
+          text = text.replace(
+              "['read', 'view_image', 'apply_patch', 'exec_command', 'write_stdin', 'loop', 'session', 'agents']",
+              "['agents', 'apply_patch', 'exec_command', 'loop', 'read', 'session', 'view_image', 'write_stdin']",
+              1
+          )
+          text = text.replace(
+              'text = p.read_text().replace("toBeLessThanOrEqual(7)", "toBeLessThanOrEqual(8)")',
+              'text = p.read_text().replace("toBeLessThanOrEqual(7)", "toBeLessThanOrEqual(8)").replace("toHaveLength(7)", "toHaveLength(8)").replace("capped at seven live schemas", "capped at eight live schemas")'
           )
           p.write_text(text)
           PY
