@@ -5039,6 +5039,35 @@
   }
 
   let loopSlashBusy = false;
+  let loopNoticeTimer = 0;
+
+  function showLoopNotice(message) {
+    const text = String(message || '').trim();
+    if (!text) return;
+    let node = document.getElementById('clf-loop-notice');
+    if (!node) {
+      node = document.createElement('div');
+      node.id = 'clf-loop-notice';
+      node.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:2147483647;max-width:420px;padding:9px 12px;border-radius:10px;background:rgba(30,30,30,.92);color:#fff;font:12px/1.35 system-ui,sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.25);pointer-events:none';
+      document.documentElement.appendChild(node);
+    }
+    node.textContent = text;
+    if (loopNoticeTimer) clearTimeout(loopNoticeTimer);
+    loopNoticeTimer = setTimeout(() => {
+      const current = document.getElementById('clf-loop-notice');
+      if (current) current.remove();
+      loopNoticeTimer = 0;
+    }, 4000);
+  }
+
+  function adoptLoopReply(data) {
+    if (!data || typeof data !== 'object') return;
+    if (data.view && typeof data.view === 'object') {
+      loopConfig = data.view;
+      loopDraft = data.view.draft || null;
+    }
+    showLoopNotice(data.message || '');
+  }
 
   async function runLoopSlash(input) {
     if (loopSlashBusy) return;
@@ -5051,6 +5080,7 @@
           : { type: 'loop_open', input }
       );
       if (!reply || reply.ok !== true || !reply.data) return;
+      adoptLoopReply(reply.data);
       const prompt = typeof reply.data.prompt === 'string' ? reply.data.prompt : null;
       if (prompt === null) {
         // Status/clear is handled locally and should not consume a ChatGPT turn.
@@ -5086,6 +5116,23 @@
       event.preventDefault();
       event.stopPropagation();
       void runLoopSlash(input);
+    }, true);
+  }
+
+  function wireLoopEscape() {
+    // Claude Code's Esc-while-waiting behavior maps to an idle browser page. Do not steal
+    // Escape while a turn is running or while the user has a draft; the key keeps its normal
+    // ChatGPT/browser meaning and cancellation happens as an additional local side effect.
+    listen(document, 'keydown', (event) => {
+      if (event.key !== 'Escape' || event.isComposing || !conversationId || !loopConfig || !loopConfig.active) return;
+      if (generating || CLF_DOM.generating() || nativeBusy || compactCapture || (job && job.busy)) return;
+      const box = CLF_DOM.composer();
+      if (box && (box.textContent || '').trim() !== '') return;
+      void ask({ type: 'loop_start', conversationId, input: '/loop clear' })
+        .then((reply) => {
+          if (reply && reply.ok === true && reply.data) adoptLoopReply(reply.data);
+        })
+        .catch(() => undefined);
     }, true);
   }
 
@@ -8599,6 +8646,7 @@
   wireTips();
   wireMenu();
   wireLoopSlash();
+  wireLoopEscape();
   if (typeof globalThis.addEventListener === 'function') {
     listen(globalThis, 'wheel', notePresentationScrollInput, { capture: true, passive: true });
     listen(globalThis, 'touchmove', notePresentationScrollInput, { capture: true, passive: true });

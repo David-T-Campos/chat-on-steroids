@@ -59,6 +59,7 @@ interface LoopRecord {
   noOpStreak: number;
   fallbackArmed: boolean;
   fallbackMisses: number;
+  usesDefaultPrompt: boolean;
   generation: number;
 }
 
@@ -213,6 +214,36 @@ function intervalLabel(seconds: number): string {
   return `${value} minute${value === 1 ? '' : 's'}`;
 }
 
+/**
+ * Fixed /loop is cron-shaped rather than an elapsed timer: minute cadences align to clean
+ * minute marks, hour cadences to local wall-clock hours, and day cadences to local midnight.
+ * This mirrors the observable CronCreate cadence without pretending to know Anthropic's
+ * private deterministic-jitter hash. Dynamic one-shot wakeups deliberately do not use this.
+ */
+export function nextFixedFireAt(intervalSeconds: number, now = Date.now()): number {
+  const seconds = Math.max(60, Math.floor(intervalSeconds));
+  const base = new Date(now);
+  if (seconds < 3_600) {
+    const minutes = Math.max(1, Math.round(seconds / 60));
+    base.setSeconds(0, 0);
+    const nextMinute = Math.floor(base.getMinutes() / minutes) * minutes + minutes;
+    base.setMinutes(nextMinute);
+    return base.getTime();
+  }
+  if (seconds <= 86_400) {
+    const hours = Math.max(1, Math.round(seconds / 3_600));
+    base.setMinutes(0, 0, 0);
+    const nextHour = Math.floor(base.getHours() / hours) * hours + hours;
+    base.setHours(nextHour);
+    return base.getTime();
+  }
+  const days = Math.max(1, Math.round(seconds / 86_400));
+  base.setHours(0, 0, 0, 0);
+  base.setDate(base.getDate() + 1);
+  while ((base.getDate() - 1) % days !== 0) base.setDate(base.getDate() + 1);
+  return base.getTime();
+}
+
 function stripCommand(raw: string): string {
   const input = cleanInput(raw);
   const match = /^\/(?:loop|proactive)(?:\s+|$)/i.exec(input);
@@ -296,14 +327,26 @@ export function parseLoopCommand(raw: string): ParsedLoopCommand {
   };
 }
 
-function iterationPrompt(record: Pick<LoopRecord, 'mode' | 'prompt'>): string {
+function iterationPrompt(record: Pick<LoopRecord, 'mode' | 'prompt' | 'usesDefaultPrompt' | 'normalizedInterval' | 'expiresAt'>): string {
+  const defaultResolution = record.usesDefaultPrompt
+    ? [
+        'This loop was started without an explicit prompt. At the beginning of EVERY iteration, first try to read `.claude/loop.md` from the current learned project workspace.',
+        'If that project file exists, treat its current Markdown contents (up to 25,000 bytes) as the loop task for this iteration. Re-read it next iteration so edits or deletion take effect.',
+        'If the project file is absent, unreadable, or there is not yet a learned project workspace, use the built-in maintenance task below instead.',
+        'The app intentionally does not auto-read `~/.claude/loop.md` outside approved roots; do not route around that filesystem boundary.',
+        '',
+        'Built-in maintenance fallback:',
+        record.prompt
+      ].join('\n')
+    : record.prompt;
   if (record.mode === 'fixed') {
     return [
       '[Chat On Steroids /loop — scheduled iteration]',
       '',
+      `This recurring loop is already scheduled on a fixed ${record.normalizedInterval ?? 'cadence'} and expires automatically after seven days. Briefly acknowledge that schedule in your response.`,
       'Execute the recurring task below now, using the current conversation and current machine state:',
       '',
-      record.prompt,
+      defaultResolution,
       '',
       'The app already owns the fixed schedule. Do not create another timer or duplicate schedule. Complete this iteration normally.'
     ].join('\n');
@@ -311,9 +354,10 @@ function iterationPrompt(record: Pick<LoopRecord, 'mode' | 'prompt'>): string {
   return [
     '[Chat On Steroids /loop — self-paced iteration]',
     '',
+    'This loop is self-paced and expires automatically after seven days. Briefly acknowledge that you are self-pacing and that you ran this iteration now.',
     'Execute the recurring task below now, using the current conversation and current machine state:',
     '',
-    record.prompt,
+    defaultResolution,
     '',
     'At the end of this iteration, make an explicit pacing decision with the `loop` tool.',
     `If more work should happen later, call action=schedule_wakeup with delay_seconds between ${DYNAMIC_MIN_DELAY_SECONDS} and ${DYNAMIC_MAX_DELAY_SECONDS}, a specific one-sentence reason, and noop=true only when this iteration observed no meaningful change.`,
@@ -338,7 +382,7 @@ function recordFromParsed(conversationId: string, parsed: ParsedLoopCommand, sou
     // a valid `loop` tool call replaces it before it can fire.
     nextAt:
       parsed.mode === 'fixed' && parsed.intervalSeconds
-        ? now + parsed.intervalSeconds * 1000
+        ? nextFixedFireAt(parsed.intervalSeconds, now)
         : now + DYNAMIC_FALLBACK_MS,
     runCount: 1,
     lastRunAt: now,
@@ -346,6 +390,7 @@ function recordFromParsed(conversationId: string, parsed: ParsedLoopCommand, sou
     noOpStreak: 0,
     fallbackArmed: parsed.mode === 'dynamic',
     fallbackMisses: 0,
+    usesDefaultPrompt: parsed.usedDefaultPrompt,
     generation: generation++
   };
 }
@@ -401,6 +446,7 @@ export function restoreLoops(snapshot: LoopsSnapshot | null): void {
       prompt: cleanPrompt(raw.prompt),
       sourceInput: cleanInput(raw.sourceInput),
       reason: String(raw.reason || '').slice(0, MAX_REASON_CHARS),
+      usesDefaultPrompt: raw.usesDefaultPrompt === true,
       generation: Number.isInteger(raw.generation) ? raw.generation : generation++
     };
     if (!entry.prompt) continue;
@@ -531,7 +577,13 @@ export async function openPendingLoopNow(
   await changedNow();
   return {
     parsed,
-    prompt: iterationPrompt({ mode: parsed.mode, prompt: parsed.prompt }),
+    prompt: iterationPrompt({
+      mode: parsed.mode,
+      prompt: parsed.prompt,
+      usesDefaultPrompt: parsed.usedDefaultPrompt,
+      normalizedInterval: parsed.normalizedInterval,
+      expiresAt: now + LOOP_TTL_MS
+    }),
     message: parsed.mode === 'fixed' ? 'Loop will bind to the new chat after its first send.' : 'Self-paced loop will bind to the new chat after its first send.'
   };
 }
@@ -629,7 +681,7 @@ export function loopViewFor(conversationId: string, clientId: string): LoopView 
     const seconds = Math.max(60, record.intervalSeconds ?? 60);
     // No catch-up. A laptop asleep for three hours gets one run when it is observed idle,
     // then the next cadence starts from that fire.
-    record.nextAt = now + seconds * 1000;
+    record.nextAt = nextFixedFireAt(seconds, now);
   }
   record.lastRunAt = now;
   record.runCount += 1;

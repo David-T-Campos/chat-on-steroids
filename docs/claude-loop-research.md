@@ -70,6 +70,20 @@ The first iteration runs immediately in both fixed and self-paced modes.
 
 `/proactive` is retained as an alias because Claude Code added that alias after `/loop` shipped.
 
+### `loop.md` refresh and Esc cancellation
+
+Current Claude Code re-reads `.claude/loop.md` (then `~/.claude/loop.md`) on each default-loop iteration, caps it at 25,000 bytes, and falls back to the built-in maintenance task when it is absent. Pressing `Esc` while a loop is waiting cancels that loop's pending wakeup.
+
+Chat On Steroids mirrors project-level refresh by making a default iteration read `.claude/loop.md` from the conversation's learned approved workspace every time before using the built-in fallback. It deliberately does not auto-read `~/.claude/loop.md` outside approved roots: that would silently bypass this product's filesystem security boundary. `Esc` while the browser chat is idle and its composer is empty clears the active conversation loop.
+
+### Current cloud-first offer
+
+Binary-derived current `/loop` skill text contains an additional cloud-first decision: for parsed intervals of at least one hour, or daily phrasing, eligible Claude Code sessions offer a cloud schedule before creating the local session cron. Chat On Steroids has no Anthropic Routines/cloud scheduler backend, so it does not fake that branch; all loops in this PR are explicitly local conversation loops.
+
+### Fixed-time jitter
+
+Claude's generic recurring scheduler applies a deterministic task-ID-derived offset (bounded by 30 minutes, or half the interval for sub-hour tasks). The public docs specify the bounds but not Anthropic's exact task-ID hash/offset derivation. Chat On Steroids aligns fixed fires to the same cron-shaped local wall-clock boundaries but does not invent an unverified jitter algorithm.
+
 ## Deliberate Chat On Steroids adaptations
 
 The mechanisms are mapped to this product's security and delivery architecture instead of copying implementation accidents from a terminal UI:

@@ -9,6 +9,7 @@ import {
   loopStateFor,
   loopViewFor,
   moveLoopConversation,
+  nextFixedFireAt,
   normalizeFixedInterval,
   openPendingLoopNow,
   parseLoopCommand,
@@ -62,6 +63,14 @@ describe('/loop parser', () => {
     expect(normalizeFixedInterval(13 * 60)).toBe(12 * 60);
   });
 
+  it('aligns fixed runs to cron-shaped local wall-clock boundaries', () => {
+    const now = new Date(2026, 7, 27, 10, 3, 17, 0).getTime();
+    expect(new Date(nextFixedFireAt(5 * 60, now)).getMinutes()).toBe(5);
+    const twoHours = new Date(nextFixedFireAt(2 * 60 * 60, now));
+    expect(twoHours.getHours()).toBe(12);
+    expect(twoHours.getMinutes()).toBe(0);
+  });
+
   it('uses self-paced mode when the interval is omitted', () => {
     const parsed = parseLoopCommand('/loop watch the rollout and react');
     expect(parsed.mode).toBe('dynamic');
@@ -76,6 +85,14 @@ describe('/loop parser', () => {
     expect(bare.usedDefaultPrompt).toBe(true);
     expect(bare.prompt).toBe(DEFAULT_LOOP_PROMPT);
     expect(alias.prompt).toBe(DEFAULT_LOOP_PROMPT);
+  });
+
+  it('asks default loops to re-read the project loop.md on each iteration but ignores it for explicit tasks', async () => {
+    const bare = await startLoopNow('chat-default', '/loop');
+    const explicit = await startLoopNow('chat-explicit', '/loop check CI');
+    expect(bare.prompt).toContain('.claude/loop.md');
+    expect(bare.prompt).toContain('25,000 bytes');
+    expect(explicit.prompt).not.toContain('.claude/loop.md');
   });
 
   it.each(['/loop clear', '/loop stop', '/loop off', '/loop cancel'])('%s clears', (command) => {
