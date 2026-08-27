@@ -251,8 +251,8 @@ export function parseLoopCommand(raw: string): ParsedLoopCommand {
   // Claude gives the leading compact duration priority over any trailing "every …" phrase.
   const leading = /^(\d+)\s*([smhd])(?:\s+|$)/i.exec(body);
   if (leading) {
-    const amount = Number.parseInt(leading[1], 10);
-    const unit = compactUnit(leading[2]);
+    const amount = Number.parseInt(leading[1] ?? '', 10);
+    const unit = compactUnit(leading[2] ?? '');
     if (Number.isFinite(amount) && amount > 0 && unit) {
       requestedSeconds = secondsFor(amount, unit);
       requestedInterval = leading[0].trim();
@@ -261,8 +261,8 @@ export function parseLoopCommand(raw: string): ParsedLoopCommand {
   } else {
     const trailing = /(?:^|\s)every\s+(\d+)\s*(s|m|h|d|seconds?|minutes?|hours?|days?)\s*$/i.exec(body);
     if (trailing) {
-      const amount = Number.parseInt(trailing[1], 10);
-      const unit = compactUnit(trailing[2]);
+      const amount = Number.parseInt(trailing[1] ?? '', 10);
+      const unit = compactUnit(trailing[2] ?? '');
       if (Number.isFinite(amount) && amount > 0 && unit) {
         requestedSeconds = secondsFor(amount, unit);
         requestedInterval = trailing[0].trim();
