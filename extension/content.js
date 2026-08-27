@@ -613,6 +613,9 @@
    */
   let goalConfig = null;
   let goalDraft = null;
+  let loopConfig = null;
+  let loopDraft = null;
+  let loopBusy = false;
   /**
    * The generation the goal loop has already acted on.
    *
@@ -951,7 +954,11 @@
     // conversation, and nothing ever asked again. That is what left the popup showing the
     // old chat's id beside the new chat's URL while the app had no session for either.
     const reply = await ask({ type: 'bind', conversationId: id });
-    if (reply && reply.ok === true) boundId = id;
+    if (reply && reply.ok === true) {
+      boundId = id;
+      // A /loop started from New Chat was fenced by this exact tab until ChatGPT minted id.
+      void ask({ type: 'loop_claim', conversationId: id }).catch(() => undefined);
+    }
   }
 
   /**
@@ -4948,6 +4955,8 @@
       // finished and the page has been repainted with what the draft is doing.
       goalConfig = data.goal && typeof data.goal === 'object' ? data.goal : null;
       if (goalConfig) goalDraft = goalConfig.draft || null;
+      loopConfig = data.loop && typeof data.loop === 'object' ? data.loop : null;
+      loopDraft = loopConfig && loopConfig.draft ? loopConfig.draft : null;
       bootstrap = data.bootstrap === 'resume' || data.bootstrap === 'worker' ? data.bootstrap : null;
       if (job && job.busy) pressedAt = 0;
       // The local phase describes this tab's part of a native compaction, which is over
@@ -4995,6 +5004,83 @@
     // Same reason, same place: this types into the composer and can wait on the page, and it
     // needs the draft this pull just delivered.
     if (current() && CLF_DOM.conversationId() === forId) await maybeSendGoalReply();
+    if (current() && CLF_DOM.conversationId() === forId) await maybeSendLoopReply();
+  }
+
+  /** Sends one app-owned due loop turn, and only while the user's composer is free. */
+  async function maybeSendLoopReply() {
+    const draft = loopDraft;
+    if (!draft || !conversationId || draft.conversationId !== conversationId || loopBusy) return;
+    if (goalWasSpent(conversationId, draft.token)) {
+      loopDraft = null;
+      await ask({ type: 'loop_ack', conversationId, token: draft.token, sent: true }).catch(() => undefined);
+      return;
+    }
+    if (generating || CLF_DOM.generating() || compactCapture || nativeBusy || goalBusy || (job && job.busy)) return;
+    const box = CLF_DOM.composer();
+    if (!box || (box.textContent || '').trim() !== '') return;
+    loopBusy = true;
+    try {
+      if (!CLF_DOM.insertPrompt(String(draft.prompt || ''))) return;
+      await sleep(120);
+      const sent = await CLF_DOM.send();
+      loopDraft = null;
+      if (sent) rememberGoalSpent(conversationId, draft.token);
+      await ask({ type: 'loop_ack', conversationId, token: draft.token, sent }).catch(() => undefined);
+    } finally {
+      loopBusy = false;
+    }
+  }
+
+  let loopSlashBusy = false;
+
+  async function runLoopSlash(input) {
+    if (loopSlashBusy) return;
+    loopSlashBusy = true;
+    const beforeId = CLF_DOM.conversationId();
+    try {
+      const reply = await ask(
+        beforeId
+          ? { type: 'loop_start', conversationId: beforeId, input }
+          : { type: 'loop_open', input }
+      );
+      if (!reply || reply.ok !== true || !reply.data) return;
+      const prompt = typeof reply.data.prompt === 'string' ? reply.data.prompt : null;
+      if (prompt === null) {
+        // Status/clear is handled locally and should not consume a ChatGPT turn.
+        CLF_DOM.replacePrompt('');
+        return;
+      }
+      if (!CLF_DOM.replacePrompt(prompt)) return;
+      await sleep(120);
+      const sent = await CLF_DOM.send();
+      if (!sent) {
+        // Schedule creation happened before the irreversible browser send. Roll it back if
+        // ChatGPT refused that matching first iteration.
+        if (beforeId) {
+          await ask({ type: 'loop_start', conversationId: beforeId, input: '/loop clear' }).catch(() => undefined);
+        } else {
+          await ask({ type: 'loop_open', input: '/loop clear' }).catch(() => undefined);
+        }
+      }
+    } finally {
+      loopSlashBusy = false;
+    }
+  }
+
+  function wireLoopSlash() {
+    listen(document, 'keydown', (event) => {
+      if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
+      const box = CLF_DOM.composer();
+      if (!box) return;
+      const target = event.target;
+      if (target !== box && !(box.contains && target && box.contains(target))) return;
+      const input = (box.textContent || '').trim();
+      if (!/^\/(?:loop|proactive)(?:\s|$)/i.test(input)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void runLoopSlash(input);
+    }, true);
   }
 
   // ------------------------------------------------------- composer control
@@ -8506,6 +8592,7 @@
   syncTheme();
   wireTips();
   wireMenu();
+  wireLoopSlash();
   if (typeof globalThis.addEventListener === 'function') {
     listen(globalThis, 'wheel', notePresentationScrollInput, { capture: true, passive: true });
     listen(globalThis, 'touchmove', notePresentationScrollInput, { capture: true, passive: true });

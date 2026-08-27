@@ -1334,6 +1334,19 @@ var CLF_DOM = (() => {
     }, false);
   }
 
+  /** Replaces the current composer draft through the native editing path. */
+  function replacePrompt(value) {
+    return safe(() => {
+      const box = composer();
+      if (!box) return false;
+      box.focus();
+      document.execCommand('selectAll', false, null);
+      document.execCommand('insertText', false, String(value || ''));
+      box.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: String(value || '') }));
+      return (box.textContent || '').trim() === String(value || '').trim();
+    }, false);
+  }
+
   async function send() {
     try {
       const box = composer();
@@ -1452,6 +1465,7 @@ var CLF_DOM = (() => {
     hideProgress,
     replaceTurn,
     insertPrompt,
+    replacePrompt,
     send
   };
 })();

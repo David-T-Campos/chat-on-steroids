@@ -91,9 +91,9 @@ export interface SurfaceDefinition {
  *    it here. A dedicated connector for one conditional schema is pure setup overhead with
  *    no discovery benefit.
  *
- * Core declares 8 possible tool names below, but at most 7 schemas are live at once. `find`
+ * Core declares 9 possible tool names below, but at most 8 schemas are live at once. `find`
  * and the exec pair are mutually exclusive — `find` exists only when command execution is
- * off — so no runtime tools/list reaches all 8 declarations.
+ * off — so no runtime tools/list reaches all 9 declarations. `loop` is the one small scheduler control used only by active self-paced /loop turns.
  */
 const CORE: SurfaceDefinition = {
   id: 'core',
@@ -107,7 +107,7 @@ const CORE: SurfaceDefinition = {
     'enabled it — spawns and coordinates worker agents, subagents or a parallel swarm across several ChatGPT conversations.',
   cardSummary: 'Files, patches and the terminal. Required — this is the coding connector.',
   required: true,
-  tools: ['read', 'view_image', 'find', 'apply_patch', 'exec_command', 'write_stdin', 'session', 'agents']
+  tools: ['read', 'view_image', 'find', 'apply_patch', 'exec_command', 'write_stdin', 'loop', 'session', 'agents']
 };
 
 /**
