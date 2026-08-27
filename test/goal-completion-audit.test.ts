@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { GOAL_OBJECTIVE_TRAILER, GOAL_SYSTEM_TRAILER } from '../src/shared/goal.js';
 
 describe('Goal completion audit trailers', () => {
-  it('does not accept a bare computer-use completion claim as proof', () => {
+  it('does not accept computer-use completion language without transcript evidence', () => {
     for (const trailer of [GOAL_SYSTEM_TRAILER, GOAL_OBJECTIVE_TRAILER]) {
       expect(trailer).toContain('computer-use');
-      expect(trailer).toContain('bare claim');
       expect(trailer).toContain('planned');
       expect(trailer).toContain('promised');
       expect(trailer).toContain('failed');
+      expect(trailer).toContain('verification');
     }
   });
 
@@ -21,7 +21,7 @@ describe('Goal completion audit trailers', () => {
     for (const trailer of [GOAL_SYSTEM_TRAILER, GOAL_OBJECTIVE_TRAILER]) {
       expect(trailer).toContain('three consecutive assistant turns');
       expect(trailer).toContain('user-only');
-      expect(trailer).toContain('infinite loop');
+      expect(trailer).toContain('further autonomous progress impossible');
     }
   });
 
