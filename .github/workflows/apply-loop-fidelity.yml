@@ -1,0 +1,28 @@
+name: Apply loop fidelity refinements
+
+on:
+  push:
+    branches: [feature/loop-mode]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[loop-fidelity]') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: feature/loop-mode
+      - name: Apply refinements
+        run: python3 scripts/apply-loop-fidelity.py
+      - name: Commit refinements
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src extension test docs
+          git commit -m "feat: align loop refresh and cancellation semantics [loop-fidelity]"
+          git push origin HEAD:feature/loop-mode
